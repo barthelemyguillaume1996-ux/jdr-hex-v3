@@ -1,136 +1,219 @@
-﻿import React, { useMemo } from "react";
+﻿// src/ui/TimelineBar.jsx
+/* eslint-disable no-empty */
+import React, { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useAppDispatch, useAppState } from "../state/StateProvider";
+import { subscribeCast, getCastState } from "../cast/castClient";
 
-// Avatar avec support .webp/.png/.jpg/.jpeg
-function Avatar({ name = "", img = "", active = false, size = 32 }) {
-    const styleWrap = {
-        width: size,
-        height: size,
-        borderRadius: "50%",
-        overflow: "hidden",
-        border: active ? "3px solid rgba(80,220,170,0.95)" : "2px solid rgba(255,255,255,0.8)",
-        boxSizing: "border-box",
-        background: "#222",
-        display: "grid",
-        placeItems: "center"
-    };
-    const styleImg = { width: "100%", height: "100%", objectFit: "cover" };
-
-    const hasExt = /\.\w{3,4}$/.test(img);
-    const isUrl = /^(blob:|data:|https?:)/.test(img);
-
-    const initials = (name || "")
-        .split(/\s+/).filter(Boolean).slice(0, 2)
-        .map(s => s[0]?.toUpperCase() || "").join("");
-
-    return (
-        <div style={styleWrap} title={name}>
-            {!img ? (
-                <span style={{ fontSize: 12, color: "#ddd", letterSpacing: 0.3 }}>{initials || "?"}</span>
-            ) : (isUrl || hasExt) ? (
-                <img src={img} alt="" style={styleImg} onError={(e) => (e.currentTarget.style.display = "none")} />
-            ) : (
-                <picture>
-                    <source srcSet={`${img}.webp`} type="image/webp" />
-                    <source srcSet={`${img}.png`} type="image/png" />
-                    <source srcSet={`${img}.jpg`} type="image/jpeg" />
-                    <img src={`${img}.jpeg`} alt="" style={styleImg} onError={(e) => (e.currentTarget.style.display = "none")} />
-                </picture>
-            )}
-        </div>
-    );
+// Détermine si on est en vue Player
+function useIsViewer() {
+    try { return new URLSearchParams(window.location.search).has("viewer"); }
+    catch { return false; }
 }
 
-export default function TimelineBar({
-    tokens = [],
-    activeId = null,
-    onPass = null,
-    onPick = null,
-    showPassButton = false
-}) {
-    // Tri : déployés, initiative ↓ puis nom
-    const ordered = useMemo(() => {
-        const arr = tokens.filter(t => !!t.isDeployed);
-        arr.sort((a, b) => {
-            const ia = Number.isFinite(a.initiative) ? a.initiative : 0;
-            const ib = Number.isFinite(b.initiative) ? b.initiative : 0;
+export default function TimelineBar() {
+    const isViewer = useIsViewer();
+    return isViewer ? <TimelinePlayer /> : <TimelineGM />;
+}
+
+/* ================= GM ================= */
+function TimelineGM() {
+    const { tokens, combatMode, activeId, remainingSpeedById } = useAppState();
+    const dispatch = useAppDispatch();
+
+    const order = useMemo(() => {
+        const arr = (Array.isArray(tokens) ? tokens : []).filter(t => t.isDeployed);
+        return arr.slice().sort((a, b) => {
+            const ia = num(a.initiative);
+            const ib = num(b.initiative);
             if (ib !== ia) return ib - ia;
-            const na = (a.name || "").toLowerCase();
-            const nb = (b.name || "").toLowerCase();
-            if (na !== nb) return na < nb ? -1 : 1;
-            return (a.id || "").localeCompare(b.id || "");
+            return (a.name || "").localeCompare(b.name || "");
         });
-        return arr;
     }, [tokens]);
 
-    const wrap = {
-        position: "fixed",
-        left: "50%",
-        bottom: 8,
-        transform: "translateX(-50%)",
-        zIndex: 60,
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        padding: "6px 8px",
-        background: "rgba(15,15,15,0.85)",
-        border: "1px solid #2a2a2a",
-        borderRadius: 12,
-        backdropFilter: "blur(4px)",
-        boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
-        maxWidth: "90vw",
-        overflowX: "auto"
+    const onNextTurn = () => {
+        dispatch({ type: "NEXT_TURN" });
+        try { window.__castSnapshot?.(); } catch { }
     };
 
-    const item = {
-        display: "grid",
-        gap: 2,
-        justifyItems: "center",
-        minWidth: 42
-    };
-    const name = {
-        maxWidth: 68,
-        fontSize: 10,
-        color: "#ddd",
-        whiteSpace: "nowrap",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        textAlign: "center",
-        marginTop: 2
-    };
-    const initBadge = { fontSize: 10, color: "#aaa", marginTop: 0 };
-    const passBtn = {
-        padding: "6px 8px",
-        borderRadius: 8,
-        border: "1px solid #2c4",
-        background: "#18ff9b",
-        color: "#000",
-        fontWeight: 700,
-        cursor: "pointer",
-        marginLeft: 6
-    };
+    if (!combatMode || order.length === 0) return null;
 
     return (
         <div style={wrap}>
-            {ordered.map((t) => {
-                const isActive = t.id === activeId;
-                return (
-                    <button
-                        key={t.id}
-                        onClick={() => onPick && onPick(t.id)}
-                        title={t.name || ""}
-                        style={{ background: "transparent", border: "none", padding: 0, cursor: onPick ? "pointer" : "default" }}
-                    >
-                        <div style={item}>
-                            <Avatar name={t.name} img={t.img} active={isActive} size={36} />
-                            <div style={name}>{t.name || "Sans nom"}</div>
-                            <div style={initBadge}>{Number.isFinite(t.initiative) ? `Init ${t.initiative}` : ""}</div>
-                        </div>
-                    </button>
-                );
-            })}
-            {showPassButton && ordered.length > 0 && (
-                <button onClick={() => onPass && onPass()} title="Passer le tour" style={passBtn}>→</button>
-            )}
+            <div style={strip}>
+                <div style={list}>
+                    {order.map(t => (
+                        <TokenBadge
+                            key={t.id}
+                            token={t}
+                            active={t.id === activeId}
+                            showSpeed={combatMode}
+                            remaining={num(remainingSpeedById?.[t.id], null)}
+                        />
+                    ))}
+                </div>
+
+                <button
+                    onClick={onNextTurn}
+                    disabled={!combatMode || order.length === 0}
+                    style={{
+                        padding: "6px 10px",
+                        borderRadius: 8,
+                        border: "1px solid #333",
+                        background: combatMode ? "#1b1b1b" : "#0d0d0d",
+                        color: combatMode ? "#fff" : "#777",
+                        cursor: combatMode && order.length ? "pointer" : "default",
+                        fontSize: 12,
+                        whiteSpace: "nowrap"
+                    }}
+                    title="Passer au prochain tour"
+                >
+                    ▶︎ Passer tour
+                </button>
+            </div>
         </div>
     );
 }
+
+/* ================= Player ================= */
+function TimelinePlayer() {
+    // Store “cast” côté player
+    const snap = useSyncExternalStore(subscribeCast, getCastState);
+
+    // Handshake pour récupérer l'état si on arrive après le GM
+    useEffect(() => {
+        try {
+            window.__castSend?.({ type: "REQUEST_SNAPSHOT" });
+            // petit HELLO de compatibilité (le GM peut répondre via __castOnHello)
+            setTimeout(() => window.__castSend?.({ type: "HELLO" }), 50);
+        } catch { }
+    }, []);
+
+    const order = useMemo(() => {
+        const arr = (Array.isArray(snap.tokens) ? snap.tokens : []).filter(t => t.isDeployed);
+        return arr.slice().sort((a, b) => {
+            const ia = num(a.initiative);
+            const ib = num(b.initiative);
+            if (ib !== ia) return ib - ia;
+            return (a.name || "").localeCompare(b.name || "");
+        });
+    }, [snap.tokens]);
+
+    if (!snap.combatMode || order.length === 0) return null;
+
+    return (
+        <div style={wrap}>
+            <div style={strip}>
+                <div style={list}>
+                    {order.map(t => (
+                        <TokenBadge
+                            key={t.id}
+                            token={t}
+                            active={t.id === snap.activeId}
+                            showSpeed={!!snap.combatMode}
+                            remaining={num(snap.remainingSpeedById?.[t.id], null)}
+                        />
+                    ))}
+                </div>
+                {/* Pas de bouton côté joueurs */}
+            </div>
+        </div>
+    );
+}
+
+/* ================= Badge simple, inline ================= */
+function TokenBadge({ token, active, showSpeed, remaining }) {
+    const size = 32;
+    const src = token?.img || "";
+    const hasExt = /\.\w{3,4}$/.test(src);
+    const isUrl = /^(blob:|data:|https?:)/.test(src);
+
+    const frame = {
+        display: "grid",
+        gridTemplateColumns: "auto auto auto",
+        alignItems: "center",
+        gap: 8,
+        background: "#141414",
+        border: "1px solid #202020",
+        borderRadius: 10,
+        padding: "6px 8px",
+        minWidth: 0,
+    };
+
+    const avatarStyle = {
+        width: size, height: size, borderRadius: "50%",
+        objectFit: "cover", display: "block",
+        border: active ? "2px solid #18ff9b" : "2px solid #2a2a2a",
+        boxShadow: active ? "0 0 0 3px rgba(24,255,155,0.25)" : "none",
+    };
+
+    return (
+        <div style={frame}>
+            {src ? (
+                isUrl || hasExt ? (
+                    <img src={src} alt="" style={avatarStyle} />
+                ) : (
+                    <picture>
+                        <source srcSet={`${src}.webp`} type="image/webp" />
+                        <source srcSet={`${src}.png`} type="image/png" />
+                        <source srcSet={`${src}.jpg`} type="image/jpeg" />
+                        <img src={`${src}.jpeg`} alt="" style={avatarStyle} />
+                    </picture>
+                )
+            ) : (
+                <div style={{ ...avatarStyle, background: "#222" }} />
+            )}
+
+            <div
+                style={{
+                    maxWidth: 180,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    fontSize: 12,
+                    color: "#fff",
+                    opacity: 0.95
+                }}
+                title={token?.name || ""}
+            >
+                {token?.name || "Sans nom"}
+            </div>
+
+            <div style={{ fontSize: 11, color: "#aaa", padding: "0 6px", borderLeft: "1px solid #222" }}>
+                {num(token?.initiative)}
+                {showSpeed && active && Number.isFinite(remaining) ? ` • ⚡${remaining}` : ""}
+            </div>
+        </div>
+    );
+}
+
+/* ================= utils & styles ================= */
+function num(v, d = 0) { const n = +v; return Number.isFinite(n) ? n : d; }
+
+const wrap = {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 32,
+    pointerEvents: "none",
+};
+const strip = {
+    margin: "0 auto 10px auto",
+    maxWidth: 980,
+    background: "rgba(10,10,10,0.92)",
+    border: "1px solid #242424",
+    borderRadius: 12,
+    padding: 8,
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    pointerEvents: "auto",
+};
+const list = {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    overflowX: "auto",
+    paddingBottom: 4,
+    flex: 1,
+};

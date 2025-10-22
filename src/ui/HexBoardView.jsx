@@ -1,72 +1,85 @@
-﻿/* eslint-disable react-hooks/exhaustive-deps */
+﻿// src/ui/HexBoardView.jsx - PLAYER VIEW (PC Viewer)
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { dpiScaleCanvas, drawGrid, drawTokens, drawMoveRange } from "./hexboard-utils";
+import { useCastStore } from "../cast/castClient";
 import { createCamera } from "../core/camera";
+import { dpiScaleCanvas, drawGrid, drawTokens, drawMoveRange, fillHex } from "./hexboard-utils";
+import { BASE_HEX_RADIUS, HEX_SCALE, CAMERA_SCALE } from "../core/boardConfig";
 
-const HEX_SCALE = 0.12;
-const BASE_HEX_RADIUS = 40;
-const CAMERA_SCALE = 1.2;
+const HEX_RADIUS = BASE_HEX_RADIUS * HEX_SCALE;
 
-export default function HexBoardView({ tokens = [], activeId = null, combatMode = false, fullscreen = true }) {
-    const containerRef = useRef(null);
+function drawImageContain(ctx, img, W, H) {
+    const iw = img.bitmapWidth || img.width || 1;
+    const ih = img.bitmapHeight || img.height || 1;
+    if (iw <= 0 || ih <= 0) return;
+    const s = Math.min(W / iw, H / ih);
+    const dw = iw * s;
+    const dh = ih * s;
+    const dx = (W - dw) / 2;
+    const dy = (H - dh) / 2;
+    ctx.drawImage(img, dx, dy, dw, dh);
+}
+
+export default function HexBoardView({ fullscreen = true }) {
+    const {
+        tokens, activeId, combatMode, remainingSpeedById,
+        overlayTiles, currentMapUrl, camera, viewport
+    } = useCastStore();
+
+    const outerRef = useRef(null);
+    const stageRef = useRef(null);
     const canvasRef = useRef(null);
+    const mapBitmapRef = useRef(null);
+
     const rafRef = useRef(0);
-    const [size, setSize] = useState({ w: 300, h: 150 });
-    const [cam] = useState(() => ({ ...createCamera(), scale: CAMERA_SCALE }));
+    const drawRef = useRef(() => { });
+    const scheduleDrawRef = useRef(() => { });
 
-    const hexRadius = BASE_HEX_RADIUS * HEX_SCALE;
+    const [baseSize, setBaseSize] = useState({ w: 1920, h: 753 });
+    const [outerSize, setOuterSize] = useState({ w: 300, h: 150 });
 
-    const normalized = useMemo(() => tokens.map(t => ({
-        ...t,
-        cellRadius: Number.isFinite(t?.cellRadius) ? t.cellRadius : 1
-    })), [tokens]);
+    const cam = useMemo(() => {
+        const c = camera || { tx: 0, ty: 0, scale: CAMERA_SCALE };
 
-    const activeToken = useMemo(() => normalized.find(t => t.id === activeId) || null, [normalized, activeId]);
+        const bw = Math.max(1, baseSize.w);
+        const bh = Math.max(1, baseSize.h);
+        const ow = Math.max(1, outerSize.w);
+        const oh = Math.max(1, outerSize.h);
 
-    const parseSpeed = (t) => {
-        if (!t) return 0;
-        const n = Number(t.speed);
-        return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
-    };
-    const moveAllowance = (t) => {
-        if (!t) return 0;
-        const full = parseSpeed(t);
-        return Number.isFinite(t.pmLeft) ? t.pmLeft : full;
-        // pmLeft est envoyé par le MJ via snapshot
-    };
+        const zoomScale = Math.min(ow / bw, oh / bh);
 
-    const draw = useCallback(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
+        return {
+            ...createCamera(),
+            tx: Number.isFinite(+c.tx) ? +c.tx : 0,
+            ty: Number.isFinite(+c.ty) ? +c.ty : 0,
+            scale: (Number.isFinite(+c.scale) ? +c.scale : CAMERA_SCALE) * zoomScale,
+        };
+    }, [camera, baseSize, outerSize]);
 
-        dpiScaleCanvas(canvas, ctx, size.w, size.h);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        drawGrid(ctx, cam, size.w, size.h, hexRadius);
-
-        if (combatMode && activeToken) {
-            const allow = moveAllowance(activeToken);
-            drawMoveRange(ctx, cam, size.w, size.h, hexRadius, activeToken.q, activeToken.r, allow);
-        }
-
-        const toDraw = normalized.filter(t => t.isDeployed);
-        drawTokens(ctx, toDraw, activeId, cam, size.w, size.h, hexRadius, () => { });
-    }, [cam, size.w, size.h, hexRadius, normalized, activeId, combatMode, activeToken]);
-
-    const scheduleDraw = useCallback(() => {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = requestAnimationFrame(() => draw());
-    }, [draw]);
+    const stageScale = useMemo(() => {
+        const bw = Math.max(1, baseSize.w);
+        const bh = Math.max(1, baseSize.h);
+        const ow = Math.max(1, outerSize.w);
+        const oh = Math.max(1, outerSize.h);
+        return Math.max(ow / bw, oh / bh);
+    }, [baseSize, outerSize]);
 
     useEffect(() => {
-        const el = containerRef.current;
+        const w = +viewport?.w, h = +viewport?.h;
+        if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+            setBaseSize({ w, h });
+        }
+    }, [viewport]);
+
+    useEffect(() => {
+        const el = outerRef.current;
         if (!el) return;
         const ro = new ResizeObserver((entries) => {
-            for (const entry of entries) {
-                const cr = entry.contentRect;
-                setSize({ w: Math.max(1, cr.width), h: Math.max(1, cr.height) });
+            for (const e of entries) {
+                const r = e.contentRect;
+                setOuterSize({
+                    w: Math.max(1, Math.round(r.width)),
+                    h: Math.max(1, Math.round(r.height)),
+                });
             }
         });
         ro.observe(el);
@@ -74,26 +87,147 @@ export default function HexBoardView({ tokens = [], activeId = null, combatMode 
     }, []);
 
     useEffect(() => {
-        scheduleDraw();
-        return () => cancelAnimationFrame(rafRef.current);
-    }, [hexRadius, scheduleDraw]);
+        let alive = true;
+        mapBitmapRef.current = null;
+        if (!currentMapUrl) { scheduleDrawRef.current?.(); return; }
+
+        (async () => {
+            try {
+                const res = await fetch(currentMapUrl, { cache: "force-cache" });
+                const blob = await res.blob();
+                const bmp = await (window.createImageBitmap
+                    ? createImageBitmap(blob)
+                    : new Promise((resolve) => {
+                        const img = new Image();
+                        img.onload = () => resolve(img);
+                        img.src = URL.createObjectURL(blob);
+                    }));
+                if (!alive) return;
+                mapBitmapRef.current = bmp;
+                scheduleDrawRef.current?.();
+            } catch {
+                mapBitmapRef.current = null;
+                scheduleDrawRef.current?.();
+            }
+        })();
+
+        return () => { alive = false; };
+    }, [currentMapUrl]);
+
+    const requestRedraw = useCallback(() => scheduleDrawRef.current?.(), []);
+
+    const draw = useCallback(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+
+        const W = baseSize.w, H = baseSize.h;
+        dpiScaleCanvas(canvas, ctx, W, H);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const mapBmp = mapBitmapRef.current;
+        if (mapBmp) drawImageContain(ctx, mapBmp, W, H);
+
+        drawGrid(ctx, cam, W, H, HEX_RADIUS);
+
+        if (Array.isArray(overlayTiles) && overlayTiles.length) {
+            ctx.save();
+            for (const t of overlayTiles) {
+                if (t && Number.isFinite(+t.q) && Number.isFinite(+t.r) && typeof t.texId === "string" && t.texId) {
+                    fillHex(ctx, cam, W, H, HEX_RADIUS, t.q, t.r, t.texId);
+                }
+            }
+            ctx.restore();
+        }
+
+        if (combatMode && activeId) {
+            const left = Number(remainingSpeedById?.[activeId]);
+            const active = tokens.find((t) => t.id === activeId);
+            if (active && Number.isFinite(left) && left > 0) {
+                drawMoveRange(ctx, cam, W, H, HEX_RADIUS, active.q, active.r, left);
+            }
+        }
+
+        drawTokens(ctx, tokens, activeId, cam, W, H, HEX_RADIUS, requestRedraw);
+    }, [baseSize, tokens, activeId, combatMode, remainingSpeedById, overlayTiles, cam, requestRedraw]);
+
+    drawRef.current = draw;
+
+    const scheduleDraw = useCallback(() => {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = requestAnimationFrame(() => drawRef.current());
+    }, []);
+    scheduleDrawRef.current = scheduleDraw;
 
     useEffect(() => {
         scheduleDraw();
-    }, [normalized, activeId, scheduleDraw, combatMode]);
+        return () => cancelAnimationFrame(rafRef.current);
+    }, [scheduleDraw]);
+
+    useEffect(() => { scheduleDraw(); }, [baseSize, tokens, activeId, combatMode, remainingSpeedById, overlayTiles, cam]);
 
     return (
         <div
-            ref={containerRef}
+            ref={outerRef}
             style={{
                 width: fullscreen ? "100vw" : "100%",
                 height: fullscreen ? "100vh" : "100%",
                 position: "relative",
                 background: "#111",
-                overflow: "hidden"
+                overflow: "hidden",
+                touchAction: "none",
+                WebkitUserSelect: "none",
+                userSelect: "none",
             }}
         >
-            <canvas ref={canvasRef} style={{ width: size.w, height: size.h, display: "block" }} />
+            <div
+                ref={stageRef}
+                style={{
+                    position: "absolute",
+                    left: "50%",
+                    top: "50%",
+                    transform: `translate(-50%, -50%) scale(${stageScale})`,
+                    transformOrigin: "center center",
+                    width: baseSize.w,
+                    height: baseSize.h,
+                    overflow: "hidden",
+                }}
+            >
+                <canvas
+                    ref={canvasRef}
+                    width={baseSize.w}
+                    height={baseSize.h}
+                    style={{
+                        width: "100%",
+                        height: "100%",
+                        display: "block",
+                        imageRendering: "high-quality",
+                    }}
+                />
+            </div>
+
+            <div
+                style={{
+                    position: "fixed",
+                    bottom: 8,
+                    left: 8,
+                    padding: "8px 12px",
+                    background: "rgba(0,0,0,0.85)",
+                    color: "#0f0",
+                    fontSize: 11,
+                    fontFamily: "monospace",
+                    borderRadius: 6,
+                    pointerEvents: "none",
+                    zIndex: 9999,
+                    border: "1px solid #0f0",
+                }}
+            >
+                📐 GM viewport: {baseSize.w}×{baseSize.h}<br />
+                📱 Screen: {outerSize.w}×{outerSize.h}<br />
+                🔍 Scale: {stageScale.toFixed(2)}x | Camera: {cam.scale.toFixed(2)}<br />
+                ⚔️ Combat: {combatMode ? "✅" : "❌"}
+            </div>
         </div>
     );
 }
