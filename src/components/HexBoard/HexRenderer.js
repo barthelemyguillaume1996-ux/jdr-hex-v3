@@ -26,7 +26,17 @@ export function screenToWorld(cam, sx, sy, width, height) {
 
 export function drawGrid(ctx, cam, width, height, hexRadius) {
     const screenHexRadius = hexRadius * cam.scale;
-    if (screenHexRadius < 1) return; // LOD: Don't draw if too small
+
+    // LOD: Don't draw grid if hexagons are too small
+    if (screenHexRadius < 3) return;
+
+    // LOD: Reduce grid density when zoomed out
+    let gridSpacing = 1;
+    if (screenHexRadius < 8) {
+        gridSpacing = 4; // Draw every 4th hex
+    } else if (screenHexRadius < 15) {
+        gridSpacing = 2; // Draw every 2nd hex
+    }
 
     const tl = screenToWorld(cam, 0, 0, width, height);
     const br = screenToWorld(cam, width, height, width, height);
@@ -43,11 +53,11 @@ export function drawGrid(ctx, cam, width, height, hexRadius) {
     ctx.strokeStyle = HEX_COLOR_DEFAULT;
     ctx.beginPath();
 
-    for (let r = rMin; r <= rMax; r++) {
+    for (let r = rMin; r <= rMax; r += gridSpacing) {
         const qMin = Math.floor(tl.wx / colW - r / 2) - 1;
         const qMax = Math.ceil(br.wx / colW - r / 2) + 1;
 
-        for (let q = qMin; q <= qMax; q++) {
+        for (let q = qMin; q <= qMax; q += gridSpacing) {
             const { x, y } = axialToPixel(q, r, hexRadius);
 
             // Draw Hexagon
