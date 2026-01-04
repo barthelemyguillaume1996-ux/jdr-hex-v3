@@ -1,229 +1,294 @@
-﻿/* eslint-disable no-unused-vars */
-/* eslint-disable react-refresh/only-export-components */
-/* eslint-disable no-empty */
-// src/state/StateProvider.jsx
-// NOTE: Gestion d'état UNIQUEMENT. Les snapshots sont gérés par CastBridge.jsx
+import React, { createContext, useContext, useReducer, useEffect } from 'react';
+import { hexDistance } from '../lib/hexMath';
 
-import React, { createContext, useContext, useEffect, useMemo, useReducer, useRef } from "react";
-import "../cast/castClient";
-import { CAMERA_SCALE } from "../core/boardConfig";
+const StateContext = createContext();
+const DispatchContext = createContext();
 
-// --- utils ---
-function uid() { return Math.random().toString(36).slice(2, 10); }
-function toNum(v, def = 0) { const n = +v; return Number.isFinite(n) ? n : def; }
-function hexDistance(q1, r1, q2, r2) {
-    const dq = q2 - q1, dr = q2 - q1, ds = -(q2 + r2) + (q1 + r1);
-    return (Math.abs(dq) + Math.abs(dr) + Math.abs(ds)) / 2;
-}
-function sortByInitiative(arr) {
-    return arr.slice().sort((a, b) => {
-        const ia = toNum(a.initiative, 0), ib = toNum(b.initiative, 0);
-        if (ib !== ia) return ib - ia;
-        return (a.name || "").localeCompare(b.name || "");
-    });
-}
-function loadLS(key, fallback) { try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : fallback; } catch { return fallback; } }
-
-// --- LS keys ---
-const LS_TOKENS = "tokensV3";
-const LS_OVERLAY = "overlayTilesV3";
-const LS_DRAWINGS = "drawingsV3";
-const LS_CUR_MAP = "currentMapV3";
-
-// --- état initial ---
 const initialState = {
-    tokens: loadLS(LS_TOKENS, []),
-    activeId: null,
-    combatMode: false,
-    remainingSpeedById: {},
-    overlayTiles: loadLS(LS_OVERLAY, []),
-    drawings: loadLS(LS_DRAWINGS, []),
+    tokens: [],
+    overlayTiles: [],
+    draftOverlayTiles: [],
+    mapConfig: {
+        hexRadius: 50
+    },
+    // UI State
+    ui: {
+        leftPanelOpen: true,
+        rightPanelOpen: true,
+        combatMode: false,
+        drawMode: false,
+        pencilMode: false,
+        currentBrush: { size: 1, color: "rgba(255, 100, 100, 0.5)", type: "default" },
+        activeTokenId: null,
+        zoom: 1,
+    },
+    // Data
+    drawings: [],
+    pencilStrokes: [],
     maps: [],
-    currentMapUrl: loadLS(LS_CUR_MAP, null),
-    drawMode: false,
+    currentMapUrl: null,
+    currentPencilStroke: null, // Transient state for live sync
 };
 
-// --- contexts ---
-const CtxState = createContext(null);
-const CtxDispatch = createContext(() => { });
-
-// --- reducer ---
 function reducer(state, action) {
     switch (action.type) {
-        case "ADD_TOKEN": {
-            const t = { id: uid(), q: 0, r: 0, isDeployed: true, initiative: 0, speed: "", cellRadius: 1, ...action.payload };
-            return { ...state, tokens: [...state.tokens, t] };
-        }
-        case "PATCH_TOKEN": {
-            return { ...state, tokens: state.tokens.map(t => t.id === action.id ? { ...t, ...action.patch } : t) };
-        }
-        case "DELETE_TOKEN": {
-            const tokens = state.tokens.filter(t => t.id !== action.id);
-            const remainingSpeedById = { ...state.remainingSpeedById }; delete remainingSpeedById[action.id];
-            const activeId = state.activeId === action.id ? null : state.activeId;
-            return { ...state, tokens, remainingSpeedById, activeId };
-        }
+        case 'LOAD_STATE':
+            return { ...state, ...action.payload };
+        case 'TOGGLE_UI_PANEL':
+            return { ...state, ui: { ...state.ui, [action.panel]: !state.ui[action.panel] } };
+        case 'SET_MODE':
+            return { ...state, ui: { ...state.ui, [action.mode]: action.value } };
+        case 'SET_BRUSH':
+            // Merge payload into currentBrush, handle specific key updates
+            const newBrush = { ...state.ui.currentBrush, ...action.payload };
+            // If payload has 'size', update it in ui directly? Or put size in currentBrush?
+            // Let's put size in currentBrush for consistency
+            return { ...state, ui: { ...state.ui, currentBrush: newBrush } };
+        case 'SET_BRUSH_SIZE':
+            return { ...state, ui: { ...state.ui, currentBrush: { ...state.ui.currentBrush, size: action.size } } };
+        case 'SET_ZOOM':
+            return { ...state, ui: { ...state.ui, zoom: action.zoom } };
 
-        case "SET_COMBAT_MODE": {
-            const combatMode = !!action.value;
-            let next = { ...state, combatMode };
-            if (combatMode) {
-                if (!state.activeId) {
-                    const order = sortByInitiative(state.tokens.filter(t => t.isDeployed));
-                    if (order.length) {
-                        const first = order[0];
-                        next.activeId = first.id;
-                        next.remainingSpeedById = { ...state.remainingSpeedById, [first.id]: toNum(first.speed, 0) };
-                    }
-                } else {
-                    const cur = state.tokens.find(t => t.id === state.activeId);
-                    if (cur && !Number.isFinite(state.remainingSpeedById[cur.id])) {
-                        next.remainingSpeedById = { ...state.remainingSpeedById, [cur.id]: toNum(cur.speed, 0) };
-                    }
-                }
-            }
-            return next;
-        }
+        case 'SET_CURRENT_PENCIL_STROKE':
+            return { ...state, currentPencilStroke: action.payload };
 
-        case "NEXT_TURN": {
-            if (!state.combatMode) return state;
-            const order = sortByInitiative(state.tokens.filter(t => t.isDeployed));
-            if (!order.length) return state;
-            let idx = state.activeId ? order.findIndex(t => t.id === state.activeId) : -1;
-            if (idx < 0) idx = 0;
-            const nextTok = order[(idx + 1) % order.length];
+        case 'ADD_PENCIL_STROKE':
+            return { ...state, pencilStrokes: [...state.pencilStrokes, action.payload] };
+
+        case 'FINISH_PENCIL_STROKE':
+            // Atomic update: Add stroke AND clear current
             return {
                 ...state,
-                activeId: nextTok.id,
-                remainingSpeedById: { ...state.remainingSpeedById, [nextTok.id]: toNum(nextTok.speed, 0) },
+                pencilStrokes: [...state.pencilStrokes, action.payload],
+                currentPencilStroke: null
+            };
+
+        case 'CLEAR_PENCIL':
+            return { ...state, pencilStrokes: [] };
+        case 'SET_CURRENT_MAP':
+            return { ...state, currentMapUrl: action.url };
+        case 'ADD_TOKEN':
+            return { ...state, tokens: [...state.tokens, action.payload] };
+        case 'UPDATE_TOKEN':
+            return {
+                ...state,
+                tokens: state.tokens.map(t => t.id === action.id ? { ...t, ...action.changes } : t)
+            };
+        case 'DELETE_TOKEN':
+            const remaining = state.tokens.filter(t => t.id !== action.id);
+            return { ...state, tokens: remaining };
+
+        case 'UPDATE_TOKEN_POSITION': {
+            const { id, newQ, newR, startQ, startR } = action;
+
+            return {
+                ...state,
+                tokens: state.tokens.map(t => {
+                    if (t.id !== id) return t;
+
+                    // Calculate distance moved
+                    const distance = hexDistance(startQ, startR, newQ, newR);
+                    const remainingSpeed = t.remainingSpeed !== undefined ? t.remainingSpeed : (t.speed || 30);
+
+                    // Consume speed
+                    const newRemainingSpeed = Math.max(0, remainingSpeed - distance);
+
+                    return {
+                        ...t,
+                        q: newQ,
+                        r: newR,
+                        remainingSpeed: newRemainingSpeed,
+                        isDragging: false
+                    };
+                })
             };
         }
 
-        case "MOVE_TOKEN": {
-            const { id, q, r } = action;
-            const t = state.tokens.find(x => x.id === id);
-            if (!t) return state;
-            if (state.combatMode && id === state.activeId) {
-                const cost = hexDistance(t.q, t.r, q, r);
-                const left = toNum(state.remainingSpeedById[id], toNum(t.speed, 0));
-                if (cost <= 0 || cost > left) return state;
+        case 'RESET_TOKEN_SPEED': {
+            return {
+                ...state,
+                tokens: state.tokens.map(t =>
+                    t.id === action.id
+                        ? { ...t, remainingSpeed: t.speed || 30 }
+                        : t
+                )
+            };
+        }
+
+        case 'OVERLAY_SET':
+            // Used for Loading: merges into Public Overlay (as per user request "Import")
+            // Actually currently it REPLACES.
+            // User said "Import", maybe better to APPEND?
+            // "Charger" usually implies "Load this scene". But if they use it to "Reveal", append is safer.
+            // Let's stick to SET (Replace) for now, as existing logic.
+            // OR: Change behavior to Append if we want "Import".
+            // Let's make OVERLAY_SET replace everything (Load scene).
+            return { ...state, overlayTiles: action.tiles };
+
+        case 'OVERLAY_MERGE': // New action for "Import" (Add to existing)
+            // Filter out duplicates? Or just overwrite.
+            const existingMap = new Map(state.overlayTiles.map(t => [`${t.q},${t.r}`, t]));
+            action.tiles.forEach(t => existingMap.set(`${t.q},${t.r}`, t));
+            return { ...state, overlayTiles: Array.from(existingMap.values()) };
+
+        case 'OVERLAY_ADD': {
+            const newTile = action.payload;
+            const exists = state.overlayTiles.some(t => t.q === newTile.q && t.r === newTile.r);
+            if (exists) {
                 return {
                     ...state,
-                    tokens: state.tokens.map(x => x.id === id ? { ...x, q, r } : x),
-                    remainingSpeedById: { ...state.remainingSpeedById, [id]: left - cost }
+                    overlayTiles: state.overlayTiles.map(t => (t.q === newTile.q && t.r === newTile.r) ? newTile : t)
                 };
             }
-            return { ...state, tokens: state.tokens.map(x => x.id === id ? { ...x, q, r } : x) };
+            return { ...state, overlayTiles: [...state.overlayTiles, newTile] };
         }
-
-        case "OVERLAY_SET": {
-            return { ...state, overlayTiles: Array.isArray(action.tiles) ? action.tiles : [] };
-        }
-        case "ADD_DRAWING": {
-            const p = action.payload;
-            if (p && Array.isArray(p.tiles)) {
-                const d = {
-                    id: p.id || Math.random().toString(36).slice(2, 10),
-                    name: p.name || "(sans titre)",
-                    tiles: p.tiles,
-                    strokes: Array.isArray(p.strokes) ? p.strokes : [],
-                    createdAt: p.createdAt || Date.now(),
-                };
-                return { ...state, drawings: [...state.drawings, d] };
-            } else {
-                const d = {
-                    id: Math.random().toString(36).slice(2, 10),
-                    name: action.name || "(sans titre)",
-                    tiles: Array.isArray(action.tiles) ? action.tiles : [],
-                    strokes: [],
-                    createdAt: Date.now(),
-                };
-                return { ...state, drawings: [...state.drawings, d] };
-            }
-        }
-        case "DELETE_DRAWING": {
-            return { ...state, drawings: state.drawings.filter(d => d.id !== action.id) };
-        }
-
-        case "SET_MAPS": {
-            let arr = action.maps;
-            if (arr && !Array.isArray(arr) && Array.isArray(arr.maps)) arr = arr.maps;
-            return { ...state, maps: Array.isArray(arr) ? arr : [] };
-        }
-        case "SET_CURRENT_MAP": {
-            return { ...state, currentMapUrl: action.url || null };
-        }
-
-        case "SET_DRAW_MODE": {
-            return { ...state, drawMode: !!action.value };
-        }
-        case "IMPORT_FULL_STATE": {
-            const p = action.payload;
-            if (!p || typeof p !== "object") return state;
+        case 'OVERLAY_REMOVE': {
             return {
                 ...state,
-                tokens: Array.isArray(p.tokens) ? p.tokens : state.tokens,
-                activeId: p.activeId ?? state.activeId,
-                combatMode: typeof p.combatMode === "boolean" ? p.combatMode : state.combatMode,
-                remainingSpeedById: (p.remainingSpeedById && typeof p.remainingSpeedById === "object")
-                    ? p.remainingSpeedById
-                    : state.remainingSpeedById,
-                overlayTiles: Array.isArray(p.overlayTiles) ? p.overlayTiles : state.overlayTiles,
-                drawings: Array.isArray(p.drawings) ? p.drawings : state.drawings,
-                currentMapUrl: typeof p.currentMapUrl === "string" ? p.currentMapUrl : state.currentMapUrl,
+                overlayTiles: state.overlayTiles.filter(t => t.q !== action.payload.q || t.r !== action.payload.r)
             };
         }
 
-        default: return state;
+        // --- DRAFT ACTIONS ---
+        case 'OVERLAY_REMOVE_BATCH': {
+            // payload: array of {q,r}
+            if (!action.payload || !Array.isArray(action.payload)) return state;
+            const toRemove = new Set(action.payload.map(t => `${t.q},${t.r}`));
+            return {
+                ...state,
+                overlayTiles: state.overlayTiles.filter(t => !toRemove.has(`${t.q},${t.r}`))
+            };
+        }
+
+        case 'DRAFT_ADD_BATCH': {
+            // payload: array of tiles
+            const newTiles = action.payload;
+            const draftMap = new Map(state.draftOverlayTiles.map(t => [`${t.q},${t.r}`, t]));
+            newTiles.forEach(t => draftMap.set(`${t.q},${t.r}`, t));
+            return { ...state, draftOverlayTiles: Array.from(draftMap.values()) };
+        }
+        case 'DRAFT_REMOVE_BATCH': {
+            if (!action.payload || !Array.isArray(action.payload)) return state;
+            const toRemove = new Set(action.payload.map(t => `${t.q},${t.r}`));
+            const currentDraft = state.draftOverlayTiles || [];
+            return {
+                ...state,
+                draftOverlayTiles: currentDraft.filter(t => !toRemove.has(`${t.q},${t.r}`))
+            };
+        }
+        case 'DRAFT_CLEAR':
+            return { ...state, draftOverlayTiles: [] };
+
+        case 'ADD_DRAWING':
+            return {
+                ...state,
+                drawings: [...state.drawings, {
+                    id: Date.now().toString(),
+                    name: action.payload.name,
+                    tiles: action.payload.tiles,
+                    createdAt: Date.now()
+                }]
+            };
+        case 'DELETE_DRAWING':
+            return {
+                ...state,
+                drawings: state.drawings.filter(d => d.id !== action.id)
+            };
+        case 'SYNC_FROM_CAST':
+            // ⚡ LIGHTWEIGHT PING: Do not touch state, just acknowledged
+            if (action.payload?.type === 'PING') {
+                return state;
+            }
+
+            return {
+                ...state,
+                // ✅ Only update if payload has the field (preserve existing state otherwise)
+                tokens: action.payload.tokens !== undefined ? action.payload.tokens : state.tokens,
+                overlayTiles: action.payload.overlayTiles !== undefined ? action.payload.overlayTiles : state.overlayTiles,
+                drawings: action.payload.drawings !== undefined ? action.payload.drawings : state.drawings,
+                pencilStrokes: action.payload.pencilStrokes !== undefined ? action.payload.pencilStrokes : state.pencilStrokes,
+                currentPencilStroke: action.payload.currentPencilStroke !== undefined ? action.payload.currentPencilStroke : state.currentPencilStroke,
+                currentMapUrl: action.payload.currentMapUrl !== undefined ? action.payload.currentMapUrl : state.currentMapUrl,
+                camera: action.payload.camera !== undefined ? action.payload.camera : state.camera,
+                ui: {
+                    ...state.ui,
+                    combatMode: action.payload.combatMode !== undefined ? action.payload.combatMode : state.ui.combatMode,
+                    activeTokenId: action.payload.activeId !== undefined ? action.payload.activeId : state.ui.activeTokenId
+                },
+                // Clear local draft in Viewer to prevent ghosting
+                draftOverlayTiles: []
+            };
+        default:
+            return state;
     }
 }
 
 export function StateProvider({ children }) {
     const [state, dispatch] = useReducer(reducer, initialState);
 
-    // miroir à jour du state
-    const stateRef = useRef(state);
-    useEffect(() => { stateRef.current = state; }, [state]);
-
-    // persist LS
-    useEffect(() => { try { localStorage.setItem(LS_TOKENS, JSON.stringify(state.tokens)); } catch { } }, [state.tokens]);
-    useEffect(() => { try { localStorage.setItem(LS_OVERLAY, JSON.stringify(state.overlayTiles)); } catch { } }, [state.overlayTiles]);
-    useEffect(() => { try { localStorage.setItem(LS_DRAWINGS, JSON.stringify(state.drawings)); } catch { } }, [state.drawings]);
-    useEffect(() => { try { localStorage.setItem(LS_CUR_MAP, JSON.stringify(state.currentMapUrl)); } catch { } }, [state.currentMapUrl]);
-
-    // charge /Maps/index.json
+    // Initial Load from File System
     useEffect(() => {
-        let alive = true;
-        (async () => {
-            try {
-                const res = await fetch("/Maps/index.json", { cache: "no-store" });
-                const json = await res.json();
-                if (alive) dispatch({ type: "SET_MAPS", maps: json });
-            } catch { }
-        })();
-        return () => { alive = false; };
+        const load = async () => {
+            if (window.api && window.api.loadAppState) {
+                console.log("Loading App State from File...");
+                const result = await window.api.loadAppState();
+                if (result.success && result.content) {
+                    try {
+                        const loaded = JSON.parse(result.content);
+                        console.log("State loaded:", loaded);
+                        dispatch({ type: 'LOAD_STATE', payload: loaded });
+                    } catch (e) {
+                        console.error("JSON Parse Error:", e);
+                    }
+                } else {
+                    console.warn("Load App State failed or empty:", result);
+                }
+            } else {
+                // Fallback to localStorage (Web mode fallback)
+                try {
+                    const saved = localStorage.getItem('jdr_hex_state');
+                    if (saved) dispatch({ type: 'LOAD_STATE', payload: JSON.parse(saved) });
+                } catch (e) { }
+            }
+        };
+        load();
     }, []);
 
-    // Simple dispatch sans gestion de snapshots (CastBridge.jsx s'en charge)
-    const dispatchCast = (action) => {
-        dispatch(action);
-    };
+    // Persist state on change (Debounced)
+    useEffect(() => {
+        const timeout = setTimeout(() => {
+            const content = JSON.stringify(state);
+            console.log("Auto-saving state (Debounced)...");
+            if (window.api && window.api.saveAppState) {
+                window.api.saveAppState(content).then(res => {
+                    if (res.success) console.log("State saved to disk.");
+                    else console.error("Failed to save state:", res.error);
+                });
+            } else {
+                localStorage.setItem('jdr_hex_state', content);
+            }
+        }, 1000); // 1s debounce to avoid too many writes
+        return () => clearTimeout(timeout);
+    }, [state]);
 
-    const value = useMemo(() => state, [state]);
+    // Expose API for file loading
+    useEffect(() => {
+        window.api_loadState = (data) => dispatch({ type: 'LOAD_STATE', payload: data });
+    }, []);
+
     return (
-        <CtxState.Provider value={value}>
-            <CtxDispatch.Provider value={dispatchCast}>{children}</CtxDispatch.Provider>
-        </CtxState.Provider>
+        <StateContext.Provider value={state}>
+            <DispatchContext.Provider value={dispatch}>
+                {children}
+            </DispatchContext.Provider>
+        </StateContext.Provider>
     );
 }
 
 export function useAppState() {
-    const ctx = useContext(CtxState);
-    if (ctx === null) throw new Error("useAppState must be used within <StateProvider>");
-    return ctx;
+    return useContext(StateContext);
 }
+
 export function useAppDispatch() {
-    const ctx = useContext(CtxDispatch);
-    if (ctx === null) throw new Error("useAppDispatch must be used within <StateProvider>");
-    return ctx;
+    return useContext(DispatchContext);
 }

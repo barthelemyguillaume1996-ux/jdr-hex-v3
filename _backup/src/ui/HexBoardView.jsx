@@ -1,4 +1,4 @@
-﻿// src/ui/HexBoardView.jsx - PLAYER VIEW (PC Viewer)
+﻿// src/ui/HexBoardView.jsx - PLAYER VIEW (PC Viewer) — sans HUD vert
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useCastStore } from "../cast/castClient";
 import { createCamera } from "../core/camera";
@@ -7,11 +7,11 @@ import { BASE_HEX_RADIUS, HEX_SCALE, CAMERA_SCALE } from "../core/boardConfig";
 
 const HEX_RADIUS = BASE_HEX_RADIUS * HEX_SCALE;
 
-function drawImageContain(ctx, img, W, H) {
+function drawImageCover(ctx, img, W, H) {
     const iw = img.bitmapWidth || img.width || 1;
     const ih = img.bitmapHeight || img.height || 1;
     if (iw <= 0 || ih <= 0) return;
-    const s = Math.min(W / iw, H / ih);
+    const s = Math.max(W / iw, H / ih); // ✅ CORRECTION: Max (Cover) pour matcher le GM
     const dw = iw * s;
     const dh = ih * s;
     const dx = (W - dw) / 2;
@@ -19,7 +19,7 @@ function drawImageContain(ctx, img, W, H) {
     ctx.drawImage(img, dx, dy, dw, dh);
 }
 
-export default function HexBoardView({ fullscreen = true }) {
+export default function HexBoardView({ fullscreen = true, zoom = 1 }) {
     const {
         tokens, activeId, combatMode, remainingSpeedById,
         overlayTiles, currentMapUrl, camera, viewport
@@ -37,24 +37,31 @@ export default function HexBoardView({ fullscreen = true }) {
     const [baseSize, setBaseSize] = useState({ w: 1920, h: 753 });
     const [outerSize, setOuterSize] = useState({ w: 300, h: 150 });
 
+    // facteur de zoom viewer (0.5 => dézoom)
+    const viewerZoom = useMemo(() => {
+        const z = Number(zoom);
+        return Number.isFinite(z) ? Math.max(0.1, z) : 1;
+    }, [zoom]);
+
+    // Caméra = caméra GM * adapt contain * viewerZoom
     const cam = useMemo(() => {
         const c = camera || { tx: 0, ty: 0, scale: CAMERA_SCALE };
 
-        const bw = Math.max(1, baseSize.w);
-        const bh = Math.max(1, baseSize.h);
-        const ow = Math.max(1, outerSize.w);
-        const oh = Math.max(1, outerSize.h);
-
-        const zoomScale = Math.min(ow / bw, oh / bh);
+        // Note: On ne doit PAS multiplier par le ratio d'écran (zoomScale) ici
+        // car le canvas a déjà la taille "logique" (baseSize = GM viewport)
+        // et il est ensuite redimensionné par CSS (stageScale).
+        // Si on multiplie ici, on applique l'échelle deux fois.
 
         return {
             ...createCamera(),
             tx: Number.isFinite(+c.tx) ? +c.tx : 0,
             ty: Number.isFinite(+c.ty) ? +c.ty : 0,
-            scale: (Number.isFinite(+c.scale) ? +c.scale : CAMERA_SCALE) * zoomScale,
+            // On garde le scale du GM * viewerZoom (optionnel utilisateur)
+            scale: (Number.isFinite(+c.scale) ? +c.scale : CAMERA_SCALE) * viewerZoom,
         };
-    }, [camera, baseSize, outerSize]);
+    }, [camera, viewerZoom]);
 
+    // Échelle CSS de la scène (cover)
     const stageScale = useMemo(() => {
         const bw = Math.max(1, baseSize.w);
         const bh = Math.max(1, baseSize.h);
@@ -63,6 +70,7 @@ export default function HexBoardView({ fullscreen = true }) {
         return Math.max(ow / bw, oh / bh);
     }, [baseSize, outerSize]);
 
+    // viewport logique envoyé par le GM
     useEffect(() => {
         const w = +viewport?.w, h = +viewport?.h;
         if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
@@ -70,6 +78,7 @@ export default function HexBoardView({ fullscreen = true }) {
         }
     }, [viewport]);
 
+    // observer la taille réelle écran
     useEffect(() => {
         const el = outerRef.current;
         if (!el) return;
@@ -86,6 +95,7 @@ export default function HexBoardView({ fullscreen = true }) {
         return () => ro.disconnect();
     }, []);
 
+    // charger la map si présente
     useEffect(() => {
         let alive = true;
         mapBitmapRef.current = null;
@@ -127,7 +137,7 @@ export default function HexBoardView({ fullscreen = true }) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
         const mapBmp = mapBitmapRef.current;
-        if (mapBmp) drawImageContain(ctx, mapBmp, W, H);
+        if (mapBmp) drawImageCover(ctx, mapBmp, W, H);
 
         drawGrid(ctx, cam, W, H, HEX_RADIUS);
 
@@ -205,28 +215,6 @@ export default function HexBoardView({ fullscreen = true }) {
                         imageRendering: "high-quality",
                     }}
                 />
-            </div>
-
-            <div
-                style={{
-                    position: "fixed",
-                    bottom: 8,
-                    left: 8,
-                    padding: "8px 12px",
-                    background: "rgba(0,0,0,0.85)",
-                    color: "#0f0",
-                    fontSize: 11,
-                    fontFamily: "monospace",
-                    borderRadius: 6,
-                    pointerEvents: "none",
-                    zIndex: 9999,
-                    border: "1px solid #0f0",
-                }}
-            >
-                📐 GM viewport: {baseSize.w}×{baseSize.h}<br />
-                📱 Screen: {outerSize.w}×{outerSize.h}<br />
-                🔍 Scale: {stageScale.toFixed(2)}x | Camera: {cam.scale.toFixed(2)}<br />
-                ⚔️ Combat: {combatMode ? "✅" : "❌"}
             </div>
         </div>
     );

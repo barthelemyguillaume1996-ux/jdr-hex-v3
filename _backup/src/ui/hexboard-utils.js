@@ -29,8 +29,14 @@ function screenToWorld(cam, sx, sy, width, height) {
     return { wx, wy };
 }
 
-/* ===== Grille ===== */
+/* ===== Grille (Optimisée Batch) ===== */
+/* ===== Grille (Optimisée Batch + LOD) ===== */
 export function drawGrid(ctx, cam, width, height, hexRadius, calibration = null) {
+    // LOD Check: Seul le TRES petit est caché (< 3px)
+    const screenHexRadius = hexRadius * cam.scale;
+    if (screenHexRadius < 3) return;
+
+    // Calcul bounds
     const tl = screenToWorld(cam, 0, 0, width, height);
     const br = screenToWorld(cam, width, height, width, height);
 
@@ -38,19 +44,34 @@ export function drawGrid(ctx, cam, width, height, hexRadius, calibration = null)
     const colW = sqrt3 * hexRadius;
     const rowH = 1.5 * hexRadius;
 
-    const rMin = Math.floor(tl.wy / rowH) - 3;
-    const rMax = Math.ceil(br.wy / rowH) + 3;
+    // Marges de sécurité réduites
+    const rMin = Math.floor(tl.wy / rowH);
+    const rMax = Math.ceil(br.wy / rowH);
 
     ctx.save();
     ctx.lineWidth = 1;
-    ctx.strokeStyle = "rgba(120,120,120,0.15)";
+    // Opacité: visible (0.15) sauf si très petit
+    const opacity = Math.min(0.2, Math.max(0.1, (screenHexRadius - 5) / 10));
+    ctx.strokeStyle = `rgba(120,120,120,${opacity})`;
 
+    ctx.beginPath();
+
+    // Optim: On ne calcule que les hex visibles
     for (let r = rMin; r <= rMax; r++) {
-        const qMin = Math.floor(tl.wx / colW - r / 2) - 3;
-        const qMax = Math.ceil(br.wx / colW - r / 2) + 3;
+        // Offset q dépendant de r (coords axiales)
+        const qOffset = Math.floor(r / 2);
+
+        // On calcule les Q visibles pour cette ligne Y
+        // x = (q + r/2) * colW
+        // q = x / colW - r/2
+        const qMin = Math.floor(tl.wx / colW - r / 2) - 1;
+        const qMax = Math.ceil(br.wx / colW - r / 2) + 1;
+
         for (let q = qMin; q <= qMax; q++) {
             const { x, y } = axialToPixel(q, r, hexRadius, calibration);
-            ctx.beginPath();
+
+            // Hex path: 6 lines
+            // Optim: on pourrait dessiner que 3 lignes (partage) mais complexe à gérer
             for (let i = 0; i < 6; i++) {
                 const ang = (Math.PI / 180) * (60 * i - 30);
                 const px = x + hexRadius * Math.cos(ang);
@@ -59,9 +80,9 @@ export function drawGrid(ctx, cam, width, height, hexRadius, calibration = null)
                 if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
             }
             ctx.closePath();
-            ctx.stroke();
         }
     }
+    ctx.stroke();
     ctx.restore();
 }
 
@@ -226,33 +247,53 @@ function fallbackColor(texId) {
     return map[texId] || "#2a2a2a";
 }
 
-export function fillHex(ctx, cam, width, height, hexRadius, q, r, texId, calibration = null) {
-    const { x, y } = axialToPixel(q, r, hexRadius, calibration);
-    const corners = Array.from({ length: 6 }, (_, i) => {
-        const ang = (Math.PI / 180) * (60 * i - 30);
-        const px = x + hexRadius * Math.cos(ang);
-        const py = y + hexRadius * Math.sin(ang);
-        const { sx, sy } = toScreen(cam, px, py, width, height);
-        return [sx, sy];
-    });
+// ✅ Rendu Batché des tuiles (GAIN DE PERF ENORME pour le drag)
+export function drawTilesBatched(ctx, tiles, cam, width, height, hexRadius, calibration = null) {
+    if (!tiles || !tiles.length) return;
+
+    // 1. Group by texture
+    const groups = {}; // { [texId]: [tile, tile...] }
+    for (const t of tiles) {
+        if (!t || !t.texId) continue;
+        if (!groups[t.texId]) groups[t.texId] = [];
+        groups[t.texId].push(t);
+    }
 
     ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(corners[0][0], corners[0][1]);
-    for (let i = 1; i < 6; i++) ctx.lineTo(corners[i][0], corners[i][1]);
-    ctx.closePath();
-
-    const pat = getPattern(texId, null, TEXTURE_TILE_PX);
-    if (pat && pat !== "loading" && pat !== "error") {
-        ctx.fillStyle = pat;
-    } else {
-        ctx.fillStyle = fallbackColor(texId);
-    }
-    ctx.fill();
     ctx.lineWidth = 1;
     ctx.strokeStyle = "rgba(0,0,0,0.25)";
-    ctx.stroke();
+
+    // 2. Batch draw per texture
+    for (const [texId, list] of Object.entries(groups)) {
+        const pat = getPattern(texId, null, TEXTURE_TILE_PX);
+        if (pat && pat !== "loading" && pat !== "error") {
+            ctx.fillStyle = pat;
+        } else {
+            ctx.fillStyle = fallbackColor(texId);
+        }
+
+        ctx.beginPath();
+        for (const t of list) {
+            const { x, y } = axialToPixel(t.q, t.r, hexRadius, calibration);
+            // 6 points
+            for (let i = 0; i < 6; i++) {
+                const ang = (Math.PI / 180) * (60 * i - 30);
+                const px = x + hexRadius * Math.cos(ang);
+                const py = y + hexRadius * Math.sin(ang);
+                const { sx, sy } = toScreen(cam, px, py, width, height);
+                if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+            }
+            ctx.closePath();
+        }
+        ctx.fill();
+        ctx.stroke();
+    }
     ctx.restore();
+}
+
+export function fillHex(ctx, cam, width, height, hexRadius, q, r, texId, calibration = null) {
+    // Deprecated but kept for backward compat (single draw)
+    drawTilesBatched(ctx, [{ q, r, texId }], cam, width, height, hexRadius, calibration);
 }
 
 /* ===== Pinceau: disque d'hex rayon r ===== */

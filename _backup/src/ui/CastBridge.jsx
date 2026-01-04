@@ -16,18 +16,23 @@ export default function CastBridge() {
         remainingSpeedById,
         overlayTiles,
         currentMapUrl,
+        viewport, // ✅ Récupéré du store global
     } = useAppState();
 
     const buildSnapshot = () => {
-        // ✅ Récupérer le dernier token bougé si dispo
-        let cameraToSend = { tx: 0, ty: 0, scale: 1 };
+        // ✅ Viewport vient du state (plus besoin de window.__lastViewport)
+        const vp = viewport || { w: 1920, h: 1080 };
 
+        let cameraToSend = { tx: 0, ty: 0, scale: 1 };
+        try { if (window.__cameraCenter) cameraToSend = window.__cameraCenter; } catch { }
+
+        // Surcharge temporaire si on veut suivre le dernier token (optionnel, comportement existant conservé)
+        /* 
         if (window.__lastMovedToken) {
-            const { q, r } = window.__lastMovedToken;
-            // Convertir coordonnées hex en world
-            const { x, y } = axialToPixel(q, r, HEX_RADIUS);
-            cameraToSend = { tx: x, ty: y, scale: 1 };
-        }
+           // ... logic existante si on voulait forcer le suivi du token, 
+           // mais attention ça écrase le pan manuel du GM si il existe
+        } 
+        */
 
         return {
             tokens: Array.isArray(tokens)
@@ -50,6 +55,7 @@ export default function CastBridge() {
             overlayTiles: Array.isArray(overlayTiles) ? overlayTiles : [],
             currentMapUrl: currentMapUrl || null,
             camera: cameraToSend,
+            viewport: vp,
             __ts: Date.now(),
         };
     };
@@ -85,7 +91,9 @@ export default function CastBridge() {
 
     const pushSnapshot = () => {
         const snap = buildSnapshot();
-        const snapStr = JSON.stringify(snap);
+        // On retire __ts pour la comparaison (sinon ça change tout le temps)
+        const { __ts, ...contentOnly } = snap;
+        const snapStr = JSON.stringify(contentOnly);
 
         if (snapStr === lastSnapshotRef.current) {
             return;
@@ -93,10 +101,20 @@ export default function CastBridge() {
 
         lastSnapshotRef.current = snapStr;
 
+        let sentViaWs = false;
         try {
+            // On tente d'envoyer via WS (si dispo)
             window.__castSend?.({ type: "SNAPSHOT", payload: snap });
+
+            // On vérifie le statut du WS pour savoir si on doit fallback en HTTP
+            const status = window.__castGetTransport?.()?.wsStatus;
+            sentViaWs = (status === "open");
         } catch { }
-        postHTTP(snap);
+
+        // Fallback HTTP uniquement si WS pas connecté
+        if (!sentViaWs) {
+            postHTTP(snap);
+        }
     };
 
     useEffect(() => {
@@ -106,14 +124,17 @@ export default function CastBridge() {
         rafRef.current = requestAnimationFrame(() => {
             timerRef.current = setTimeout(pushSnapshot, 0);
         });
-    }, [tokens, activeId, combatMode, remainingSpeedById, overlayTiles, currentMapUrl]);
+    }, [tokens, activeId, combatMode, remainingSpeedById, overlayTiles, currentMapUrl, viewport]);
 
+    // ✅ Écouter les demandes de snapshot (ex: nouveau viewer connecté en local)
     useEffect(() => {
-        const id = setInterval(() => {
-            postHTTP(buildSnapshot());
-        }, 3000);
-        return () => clearInterval(id);
-    }, []);
+        const onRequest = () => {
+            console.log("Received SNAPSHOT REQUEST via BC -> pushing state...");
+            pushSnapshot();
+        };
+        window.addEventListener("cast:request_snapshot", onRequest);
+        return () => window.removeEventListener("cast:request_snapshot", onRequest);
+    }, [tokens, activeId, combatMode, remainingSpeedById, overlayTiles, currentMapUrl, viewport]);
 
     return null;
 }

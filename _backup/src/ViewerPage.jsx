@@ -22,7 +22,7 @@ export default function ViewerPage() {
             style={{
                 width: "100vw",
                 height: "100vh",
-                background: currentMapUrl ? `#000 url(${currentMapUrl}) center/contain no-repeat` : "#111",
+                background: "#111",
                 overflow: "hidden",
                 touchAction: "none",
                 WebkitUserSelect: "none",

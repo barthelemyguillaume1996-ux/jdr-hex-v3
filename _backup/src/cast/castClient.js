@@ -1,4 +1,4 @@
-// src/cast/castClient.js - WATCHDOG OPTIMISÉ
+﻿// src/cast/castClient.js - WATCHDOG OPTIMISÉ
 import { useSyncExternalStore } from "react";
 
 /* ---------- Store réactif ---------- */
@@ -19,7 +19,7 @@ const initial = {
 
 let state = { ...initial };
 function setState(patch) {
-    state = { ...state, ...patch, _lastRx: Date.now() }; // Update timestamp on every state change
+    state = { ...state, ...patch };
     emit();
 }
 
@@ -41,11 +41,11 @@ export function applyCastMessage(msg) {
 
     switch (type) {
         case "SNAPSHOT": {
-            // console.log('[castClient] SNAPSHOT received:', {
-            //     tokens: payload?.tokens?.length || 0,
-            //     viewport: payload?.viewport,
-            //     camera: payload?.camera,
-            // });
+            console.log('[castClient] SNAPSHOT received:', {
+                tokens: payload?.tokens?.length || 0,
+                viewport: payload?.viewport,
+                camera: payload?.camera,
+            });
 
             setState({
                 tokens: Array.isArray(payload?.tokens) ? payload.tokens : [],
@@ -100,7 +100,7 @@ export function applyCastMessage(msg) {
         case "VIEWPORT": {
             const w = +payload?.w, h = +payload?.h;
             if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
-                // console.log(`[castClient] VIEWPORT received: ${w}×${h}`);
+                console.log(`[castClient] VIEWPORT received: ${w}×${h}`);
                 setState({ viewport: { w, h } });
             }
             noteRx();
@@ -259,31 +259,26 @@ if (typeof window !== "undefined") {
             localStorage.getItem("castWsUrl");
 
         // ✅ FALLBACK AUTO : Si aucune config, on tente le serveur local par défaut
-        // if (!url) { ... }
-
-        if (url) connectCast(url);
-
-        if (window.api && window.api.onBroadcastState) {
-            console.log("[castClient] Listening to Native IPC Sync...");
-            window.api.onBroadcastState((payload) => {
-                let data = payload;
-                if (typeof data === "string") {
-                    try { data = JSON.parse(data); } catch (e) { console.error("IPC Parse Error", e); return; }
-                }
-                console.log("[castClient] Received IPC State (Payload tokens: " + (data.tokens?.length) + ")");
-                applyCastMessage({ type: 'SNAPSHOT', payload: data });
-            });
+        if (!url) {
+            const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+            const host = window.location.hostname || "localhost";
+            url = `${proto}//${host}:8080`;
         }
 
+        if (url) connectCast(url);
     } catch { }
 
-    // ✅ Watchdog PULL côté Player - OPTIMISÉ
+    // ✅ Watchdog PULL côté Player - OPTIMISÉ (beaucoup moins agressif)
     let isViewer = false;
     try { isViewer = new URLSearchParams(window.location.search).has("viewer"); } catch { }
 
     if (isViewer) {
         console.log('[castClient] Player mode - watchdog DISABLED (using WS/HTTP push only)');
 
+        // ❌ DÉSACTIVÉ: Pull WS toutes les 400ms était trop agressif
+        // Le GM envoie les snapshots via WS/HTTP, pas besoin de pull en boucle
+
+        // ✅ NOUVEAU: Pull HTTP initial seulement (au cas où WS est lent)
         const pullHTTP = async () => {
             try {
                 const params = new URLSearchParams(window.location.search);
@@ -300,20 +295,23 @@ if (typeof window !== "undefined") {
                     applyCastMessage({ type: "SNAPSHOT", payload: data });
                 }
             } catch (e) {
-                // console.error('[castClient] Initial HTTP pull failed:', e);
+                console.error('[castClient] Initial HTTP pull failed:', e);
             }
         };
 
-        // Pull HTTP UNE FOIS au démarrage
+        // Pull HTTP UNE FOIS au démarrage (au cas où WS n'est pas prêt)
         setTimeout(pullHTTP, 100);
 
-        // ✅ NOUVEAU: Pull de secours TRÈS occasionnel (toutes les 30s)
+        // ✅ NOUVEAU: Pull de secours TRÈS occasionnel (toutes les 30s, pas 5s)
+        // Seulement si on n'a rien reçu depuis longtemps
         setInterval(() => {
             const idleMs = Date.now() - lastRxAt;
             if (idleMs > 20000) {  // 20 secondes d'inactivité = fallback
-                // console.log('[castClient] Long idle detected, fallback HTTP pull');
+                console.log('[castClient] Long idle detected, fallback HTTP pull');
                 pullHTTP();
             }
-        }, 10000);
+        }, 10000);  // Check toutes les 10s, pas 400ms
+
+        console.log('[castClient] Watchdog: WS push is primary, HTTP fallback every 30s if idle');
     }
 }
