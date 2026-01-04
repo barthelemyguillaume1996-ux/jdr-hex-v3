@@ -13,20 +13,51 @@ export default function RightPanel() {
     const [isImporting, setIsImporting] = useState(false);
     const [importError, setImportError] = useState(null);
 
-    // Firebase Import Handler
+    // Firebase Import Handler - Smart Update
     const handleFirebaseImport = async () => {
         setIsImporting(true);
         setImportError(null);
 
         try {
             const characters = await importCharactersAsTokens();
+            let addedCount = 0;
+            let updatedCount = 0;
 
-            // Add each character as a token
-            characters.forEach(token => {
-                dispatch({ type: 'ADD_TOKEN', payload: token });
+            characters.forEach(newToken => {
+                // Check if this character already exists (by Firebase metadata)
+                const existingToken = tokens.find(t =>
+                    t.firebaseUserId === newToken.firebaseUserId &&
+                    t.firebaseCharacterIndex === newToken.firebaseCharacterIndex
+                );
+
+                if (existingToken) {
+                    // Update existing token (preserve position and deployment status)
+                    dispatch({
+                        type: 'UPDATE_TOKEN',
+                        id: existingToken.id,
+                        changes: {
+                            name: newToken.name,
+                            hp: newToken.hp,
+                            maxHp: newToken.maxHp,
+                            initiative: newToken.initiative,
+                            speed: newToken.speed,
+                            class: newToken.class,
+                            level: newToken.level,
+                            ac: newToken.ac,
+                            // Keep position and deployment status
+                            // q, r, isDeployed stay the same
+                        }
+                    });
+                    updatedCount++;
+                } else {
+                    // Add new token
+                    dispatch({ type: 'ADD_TOKEN', payload: newToken });
+                    addedCount++;
+                }
             });
 
-            alert(`✅ ${characters.length} personnage(s) importé(s) depuis Firebase !`);
+            const message = `✅ Import terminé !\n${addedCount} nouveau(x) personnage(s)\n${updatedCount} personnage(s) mis à jour`;
+            alert(message);
         } catch (error) {
             console.error('Import error:', error);
             setImportError(error.message);
