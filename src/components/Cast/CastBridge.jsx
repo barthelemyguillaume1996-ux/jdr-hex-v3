@@ -62,6 +62,9 @@ export default function CastBridge() {
                     speed: t.speed,
                     remainingSpeed: t.remainingSpeed,
                     cellRadius: t.cellRadius,
+                    hp: t.hp, // ✅ Added HP sync
+                    maxHp: t.maxHp, // ✅ Added MaxHP sync
+                    conditions: t.conditions || [], // ✅ Added conditions sync
                 }))
                 : [],
             activeId: s.activeTokenId ?? null,

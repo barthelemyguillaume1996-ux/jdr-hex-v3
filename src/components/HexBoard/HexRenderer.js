@@ -155,8 +155,8 @@ function getTexturePattern(ctx, texture) {
     let pat = textureCache.get(texture);
     if (!pat) {
         const img = new Image();
-        img.src = `./textures/${texture}.png`; // Relative path works in both dev and production
-        // We can't really wait for load inside render loop. 
+        img.src = `./textures/${texture}.png?v=6`; // Force v6
+        // We can't really wait for load inside render loop.  
         // Strategy: trigger load, return null. Once loaded, next frame will pick it up.
         // Or store the image in cache and check connection.
 
@@ -174,86 +174,368 @@ function getTexturePattern(ctx, texture) {
 
     if (pat.pattern) return pat.pattern;
     if (pat.loaded && pat.img.complete) {
+        // CHROMA KEY FILTER
+        // Use an offscreen canvas to process the image data
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = pat.img.width;
+        tempCanvas.height = pat.img.height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(pat.img, 0, 0);
+
+        try {
+            const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+            const data = imageData.data;
+            let foundBackground = false;
+
+            // Target color: Magenta (approx R>240, G<20, B>240)
+            // Or use Top-Left pixel as key? 
+            // Let's use strict Magenta check first as we generated it so.
+            for (let i = 0; i < data.length; i += 4) {
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
+
+                // Detection for Magenta #FF00FF
+                // Relaxed Threshold to catch fringes/anti-aliasing
+                // We ensure high Red and Blue, lower Green, and that Red and Blue are balanced (purple/magenta)
+                if (r > 160 && b > 160 && g < 140 && Math.abs(r - b) < 60) {
+                    data[i + 3] = 0; // Alpha 0
+                    foundBackground = true;
+                }
+            }
+
+            if (foundBackground) {
+                tempCtx.putImageData(imageData, 0, 0);
+
+                // Save filtered image for drawImage calls
+                const filteredImg = new Image();
+                filteredImg.src = tempCanvas.toDataURL();
+                pat.processedImg = filteredImg; // Store it!
+
+                // Create pattern from PROCESSED canvas
+                pat.pattern = ctx.createPattern(tempCanvas, 'repeat');
+                return pat.pattern;
+            }
+        } catch (e) {
+            console.warn("Could not process texture transparency:", e);
+        }
+
+        // Fallback or No background found
         pat.pattern = ctx.createPattern(pat.img, 'repeat');
         return pat.pattern;
     }
     return null;
 }
 
+const overlayRenderCache = new WeakMap();
+
 export function drawOverlay(ctx, cam, width, height, hexRadius, tiles = []) {
     if (!tiles || !tiles.length) return;
 
-    // Sort or Group by texture/color to minimize state changes? 
-    // Not strictly necessary for 2D Canvas unless huge count.
+    // MEMOIZATION START
+    let renderData = overlayRenderCache.get(tiles);
+    if (!renderData) {
+        // --- EXPENSIVE COMPUTATION START ---
 
-    for (const t of tiles) {
-        if (t.q === undefined || t.r === undefined) continue;
-        const { x, y } = axialToPixel(t.q, t.r, hexRadius);
+        // Z-SORTING: Critical for 2.5D overlap
+        // Sort by 'r' (vertical position) then 'q'
+        // 1. Sort ALL tiles by depth first (standard painter's algo)
+        const everythingSorted = [...tiles].sort((a, b) => (a.r - b.r) || (a.q - b.q));
+
+        const groundTiles = [];
+        const objectTiles = [];
+
+        const is3D = (t) => ['mur', 'mur_bois', 'coffre', 'arbre', 'rocher', 'table', 'tonneau'].includes(t.texture);
+
+        // 0. Detect Dominant Ground Texture (Chameleon Logic)
+        // To fill "black holes" under walls, we guess the ground texture based on the map's majority.
+        const groundCounts = {};
+        let maxCount = 0;
+        let dominantTexture = 'herbe'; // Default fallback
+
+        everythingSorted.forEach(t => {
+            if (!is3D(t) && t.texture) {
+                groundCounts[t.texture] = (groundCounts[t.texture] || 0) + 1;
+                if (groundCounts[t.texture] > maxCount) {
+                    maxCount = groundCounts[t.texture];
+                    dominantTexture = t.texture;
+                }
+            }
+        });
+
+        everythingSorted.forEach(t => {
+            if (is3D(t)) {
+                objectTiles.push(t);
+                // SYNTHETIC UNDERLAY: Fill the void with dominant ground
+                // checks if we are not creating a duplicate (rare strictly speaking as it replaces)
+                groundTiles.push({
+                    ...t,
+                    texture: dominantTexture,
+                    color: undefined, // ensure we use texture
+                    isFiller: false // it's a real base
+                });
+            }
+            else {
+                groundTiles.push(t);
+            }
+        });
+
+        // INTERPOLATION STEP: Add "Filler" walls between neighbors
+        // This makes walls look continuous instead of cubic blocks
+        // INTERPOLATION STEP: Add "Filler" walls between neighbors
+        // This makes walls look continuous instead of cubic blocks
+        const fillers = [];
+        // We iterate over each wall type to ensure ONLY same-type walls connect
+        const wallTypes = ['mur', 'mur_bois'];
+
+        wallTypes.forEach(wallType => {
+            const wallSet = new Set(objectTiles.filter(t => t.texture === wallType).map(t => `${t.q},${t.r}`));
+
+            // 1. Calculate Rotation for Main Tiles (for wooden walls)
+            if (wallType === 'mur_bois') {
+                objectTiles.forEach(t => {
+                    if (t.texture !== wallType) return;
+
+                    // Check neighbors to determine orientation
+                    const neighbors = getHexesInRange(t, 1).filter(n => wallSet.has(`${n.q},${n.r}`));
+
+                    if (neighbors.length > 0) {
+                        // Simple heuristic: Align with first neighbor
+                        const n = neighbors[0];
+                        const dq = n.q - t.q;
+                        const dr = n.r - t.r;
+
+                        if ((dq === 1 && dr === 0) || (dq === -1 && dr === 0)) t.rotation = 0; // Horizontal
+                        else if ((dq === 0 && dr === 1) || (dq === 0 && dr === -1)) t.rotation = Math.PI / 3; // 60 deg
+                        else if ((dq === -1 && dr === 1) || (dq === 1 && dr === -1)) t.rotation = 2 * Math.PI / 3; // 120 deg
+                    }
+                });
+            }
+
+            // 2. Create Fillers
+            // For 'mur_bois', the sprite is wide enough to overlap neighbors if rotated.
+            // So we SKIP filler generation to avoid clutter/Z-fighting.
+            if (wallType === 'mur_bois') return;
+
+            objectTiles.forEach(t => {
+                if (t.texture !== wallType) return;
+
+                // Check 3 specific neighbors (Right, Bottom-Right, Bottom-Left) 
+                const neighborsCoords = [
+                    { dq: 1, dr: 0 },   // Right
+                    { dq: 0, dr: 1 },   // Bottom-Right
+                    { dq: -1, dr: 1 }   // Bottom-Left
+                ];
+
+                neighborsCoords.forEach(({ dq, dr }) => {
+                    const nq = t.q + dq;
+                    const nr = t.r + dr;
+                    if (wallSet.has(`${nq},${nr}`)) {
+                        // Found a neighbor! Create a filler at midpoint.
+                        const p1 = axialToPixel(t.q, t.r, hexRadius);
+                        const p2 = axialToPixel(nq, nr, hexRadius);
+
+                        const offX1 = (t.xOffset || 0) * cam.scale;
+                        const offY1 = (t.yOffset || 0) * cam.scale;
+
+                        const neighbor = objectTiles.find(ot => ot.q === nq && ot.r === nr && ot.texture === wallType);
+                        const offX2 = (neighbor?.xOffset || 0) * cam.scale;
+                        const offY2 = (neighbor?.yOffset || 0) * cam.scale;
+
+                        const midX = ((p1.x + offX1 / cam.scale) + (p2.x + offX2 / cam.scale)) / 2;
+                        const midY = ((p1.y + offY1 / cam.scale) + (p2.y + offY2 / cam.scale)) / 2;
+
+                        let rotation = 0;
+                        if (wallType === 'mur_bois') {
+                            if (dq === 1 && dr === 0) rotation = 0;
+                            if (dq === 0 && dr === 1) rotation = Math.PI / 3;
+                            if (dq === -1 && dr === 1) rotation = 2 * Math.PI / 3;
+                        }
+
+                        fillers.push({
+                            q: t.q, r: t.r,
+                            customX: midX,
+                            customY: midY,
+                            texture: wallType,
+                            isFiller: true,
+                            rotation: rotation
+                        });
+                    }
+                });
+            });
+        });
+
+
+
+        // Add fillers and re-sort objects by Y for correct occlusion
+        objectTiles.push(...fillers);
+        objectTiles.sort((a, b) => {
+            // Use custom Y if filler, else calculate base Y
+            // We calculate base Y here to sort meaningfully against fillers
+            // We can't rely on 'r' alone because fillers are between hexes
+            const ay = a.customY ?? axialToPixel(a.q, a.r, hexRadius).y;
+            const by = b.customY ?? axialToPixel(b.q, b.r, hexRadius).y;
+            return ay - by;
+        });
+
+        renderData = { groundTiles, objectTiles };
+        overlayRenderCache.set(tiles, renderData);
+        // --- EXPENSIVE COMPUTATION END ---
+    }
+
+    const { groundTiles, objectTiles } = renderData;
+
+    // Helper to draw a single tile
+    const drawTile = (t) => {
+        // Support explicit pixel coords (for fillers) OR axial
+        let x, y;
+        if (t.customX !== undefined && t.customY !== undefined) {
+            x = t.customX;
+            y = t.customY;
+        } else {
+            if (t.q === undefined || t.r === undefined) return;
+            // Calculate base position
+            const p = axialToPixel(t.q, t.r, hexRadius);
+            x = p.x;
+            y = p.y;
+        }
+
         const { sx, sy } = toScreen(cam, x, y, width, height);
 
-        ctx.save();
+        // Pre-calculate path for shadows/base
         ctx.beginPath();
-        for (let i = 0; i < 6; i++) {
-            const ang = (Math.PI / 180) * (60 * i - 30);
-            const px = x + hexRadius * Math.cos(ang);
-            const py = y + hexRadius * Math.sin(ang);
-            const { sx: pxS, sy: pyS } = toScreen(cam, px, py, width, height);
-            if (i === 0) ctx.moveTo(pxS, pyS); else ctx.lineTo(pxS, pyS);
+        if (!t.isFiller) {
+            for (let i = 0; i < 6; i++) {
+                const ang = (Math.PI / 180) * (60 * i - 30);
+                const px = sx + (hexRadius * cam.scale) * Math.cos(ang); // Full hex size
+                const py = sy + (hexRadius * cam.scale) * Math.sin(ang);
+                if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
         }
         ctx.closePath();
+        const hexPath = new Path2D(ctx); // Save path if supported/needed, or just use current path
 
         // Texture or Color?
         if (t.texture) {
-            const pat = getTexturePattern(ctx, t.texture);
-            if (pat) {
-                // To make pattern stick to world, we might need setTransform?
-                // Canvas patterns are screen-space by default unless transformed.
-                // Simple approach: stick to screen (paralyx effect invalid for map).
-                // Proper approach: translate pattern to match world offset.
-                // But createPattern 'repeat' repeats from 0,0.
-                // context.translate(sx_center, sy_center) might work if we fill relative?
+            // Trigger Load if not cached
+            getTexturePattern(ctx, t.texture);
 
-                // Let's try simple fill first. 
-                // To align pattern with hex, we can translate ctx to hex origin
-                // ctx.translate(sx, sy); // This moves the pattern origin
-                // But we need to account for cam scale if we want texture to zoom?
-                // Canvas patterns don't scale automatically. 
+            const imgEntry = textureCache.get(t.texture);
+            if (imgEntry && imgEntry.loaded) {
+                const is3D = ['mur', 'mur_bois', 'coffre', 'arbre', 'rocher', 'table', 'tonneau'].includes(t.texture);
+                const size = hexRadius * 2 * cam.scale; // Base size
 
-                // If we want zoomable textures, it's harder with createPattern.
-                // Alternative: Clip and drawImage.
-                // Given "Texture" usually implies detail, let's use Clip + DrawImage
+                // Use processed image if transparency filter ran
+                const sourceImg = imgEntry.processedImg || imgEntry.img;
 
-                const imgEntry = textureCache.get(t.texture);
-                if (imgEntry && imgEntry.loaded) {
-                    ctx.clip();
-                    // Draw image centered or tiled? 
-                    // Let's draw it cover-style or tiled.
-                    // If tile is small (hex), maybe just 1 texture image per hex?
-                    // Previous backup code suggested 48px tile.
+                if (is3D) {
+                    // 3D EFFECT: Draw outside of clip
+                    const offset = (hexRadius * 0.6) * cam.scale; // Lift higher
 
-                    // Simple logic: Draw image to fill the hex (cover)
-                    // Or maintain world-scale.
+                    // 1. Draw Organic Drop Shadow (Oval) - No Hex Base/Foundation
+                    if (!t.isFiller) {
+                        ctx.save();
+                        ctx.translate(0, offset * 0.3);
+                        ctx.globalAlpha = 0.2; // Lower alpha since no blur
+                        // ctx.filter = 'blur(5px)'; // REMOVED FOR PERFORMANCE
+                        ctx.fillStyle = "black";
 
-                    // Let's assume texture images look good at 100% scale = 1 unit?
-                    // Let's try drawing the image covering the hex rect.
-                    const size = hexRadius * 2 * cam.scale;
-                    ctx.drawImage(imgEntry.img, sx - size / 2, sy - size / 2, size, size);
+                        // Draw oval instead of hex
+                        ctx.beginPath();
+                        // Ellipse: center (sx, sy), radii (hexRadius*0.8, hexRadius*0.5), rotation 0
+                        ctx.ellipse(sx, sy, hexRadius * 0.8 * cam.scale, hexRadius * 0.5 * cam.scale, 0, 0, 2 * Math.PI);
+                        ctx.fill();
+                        ctx.restore();
+                    }
+
+                    // 2. Draw Object Lifted & Larger
+                    // Scale up to ensure overlap
+                    let scaleW = 1.4;
+                    let scaleH = 1.4;
+                    let yShift = 0;
+
+                    if (t.texture === 'mur' || t.texture === 'mur_bois') {
+                        scaleW = 1.35;
+                        scaleH = 1.75;
+                        yShift = size * 0.15;
+                    } else if (t.texture === 'coffre') {
+                        scaleW = 1.3;
+                        scaleH = 1.3;
+                    } else if (t.texture === 'arbre') {
+                        scaleW = 3.5;
+                        scaleH = 3.5;
+                        yShift = -size * 0.5;
+                    } else if (t.texture === 'rocher') {
+                        scaleW = 1.8;
+                        scaleH = 1.6;
+                        yShift = size * 0.1;
+                    } else if (t.texture === 'table') {
+                        scaleW = 5.4; // 3x Larger
+                        scaleH = 4.5;
+                        yShift = size * 0.1;
+                    } else if (t.texture === 'tonneau') {
+                        scaleW = 1.0;
+                        scaleH = 1.2;
+                        yShift = size * 0.1;
+                    }
+
+                    const h = size * scaleH;
+                    const w = size * scaleW;
+
+                    // FREE PLACEMENT OFFSET
+                    let freeOffsetX = 0;
+                    let freeOffsetY = 0;
+                    if (t.xOffset !== undefined) freeOffsetX = t.xOffset * cam.scale;
+                    if (t.yOffset !== undefined) freeOffsetY = t.yOffset * cam.scale;
+
+                    // Draw image centered horizontally, but lifted vertically
+                    // We render at: center X, center Y
+                    const drawX = (sx + freeOffsetX);
+                    const drawY = (sy + freeOffsetY - offset + yShift);
+
+                    if (t.rotation) {
+                        ctx.save();
+                        ctx.translate(drawX, drawY);
+                        ctx.rotate(t.rotation);
+                        // Draw centered at (0,0) after translation
+                        ctx.drawImage(sourceImg, -w / 2, -h / 2, w, h);
+                        ctx.restore();
+                    } else {
+                        // Standard drawing
+                        ctx.drawImage(sourceImg, drawX - w / 2, drawY - h / 2, w, h);
+                    }
                 } else {
-                    // Fallback while loading
-                    ctx.fillStyle = t.color || "rgba(200, 200, 200, 0.5)";
-                    ctx.fill();
+                    // Standard Flat Tile (e.g. Grass, Water) -> Clip to Hex
+                    ctx.save();
+                    ctx.clip();
+                    ctx.drawImage(sourceImg, sx - size / 2, sy - size / 2, size, size);
+                    ctx.restore();
                 }
             } else {
-                ctx.fillStyle = "rgba(100, 100, 100, 0.2)"; // loading
-                ctx.fill();
+                // Fallback while loading
+                ctx.fillStyle = t.color || "rgba(200, 200, 200, 0.5)";
+                if (['mur', 'mur_bois', 'coffre'].includes(t.texture)) {
+                    // Fallback 3d (color block)
+                    ctx.save();
+                    ctx.translate(0, -10 * cam.scale);
+                    ctx.fill();
+                    ctx.restore();
+                } else {
+                    ctx.fill();
+                }
             }
         } else {
-            ctx.fillStyle = t.color || "rgba(255, 100, 100, 0.5)";
+            // No texture, just color
+            ctx.fillStyle = t.color || "rgba(200, 200, 200, 0.5)";
             ctx.fill();
         }
+    };
 
-        ctx.restore();
-    }
+    // PASS 1: GROUND
+    groundTiles.forEach(drawTile);
+
+    // PASS 2: OBJECTS
+    objectTiles.forEach(drawTile);
 }
 
 export function drawPencilStrokes(ctx, cam, width, height, strokes = []) {
@@ -367,6 +649,42 @@ export function drawTokens(ctx, tokens, cam, width, height, hexRadius, draggingI
             ctx.font = `${Math.max(10, 12 * cam.scale)}px sans-serif`;
             ctx.textAlign = "center";
             ctx.fillText(t.name, sx, sy + r + (15 * cam.scale));
+        }
+
+        // Status Effects (Conditions) - Text Display
+        if (t.conditions && t.conditions.length > 0) {
+            let conditionY = sy + r + (25 * cam.scale); // Start below the name
+
+            t.conditions.forEach((condition) => {
+                ctx.save();
+                ctx.font = `bold ${Math.max(8, 10 * cam.scale)}px sans-serif`;
+                ctx.textAlign = "center";
+
+                // Color coding
+                if (condition.toLowerCase().includes('aveuglé') || condition.toLowerCase().includes('blinded')) ctx.fillStyle = '#9ca3af'; // Light Gray for visibility on dark
+                else if (condition.toLowerCase().includes('charmé') || condition.toLowerCase().includes('charmed')) ctx.fillStyle = '#f472b6'; // Pink
+                else if (condition.toLowerCase().includes('assourdi') || condition.toLowerCase().includes('deafened')) ctx.fillStyle = '#9ca3af';
+                else if (condition.toLowerCase().includes('effrayé') || condition.toLowerCase().includes('frightened')) ctx.fillStyle = '#a78bfa'; // Purple
+                else if (condition.toLowerCase().includes('agrippé') || condition.toLowerCase().includes('grappled')) ctx.fillStyle = '#fb923c'; // Orange
+                else if (condition.toLowerCase().includes('neutralisé') || condition.toLowerCase().includes('incapacitated')) ctx.fillStyle = '#f87171'; // Red
+                else if (condition.toLowerCase().includes('invisible')) ctx.fillStyle = '#e5e7eb'; // White
+                else if (condition.toLowerCase().includes('paralysé') || condition.toLowerCase().includes('paralyzed')) ctx.fillStyle = '#facc15'; // Yellow
+                else if (condition.toLowerCase().includes('pétrifié') || condition.toLowerCase().includes('petrified')) ctx.fillStyle = '#a8a29e'; // Stone
+                else if (condition.toLowerCase().includes('empoisonné') || condition.toLowerCase().includes('poisoned')) ctx.fillStyle = '#34d399'; // Green
+                else if (condition.toLowerCase().includes('à terre') || condition.toLowerCase().includes('prone')) ctx.fillStyle = '#a16207'; // Brown
+                else if (condition.toLowerCase().includes('entravé') || condition.toLowerCase().includes('restrained')) ctx.fillStyle = '#e11d48'; // Dark Red
+                else if (condition.toLowerCase().includes('étourdi') || condition.toLowerCase().includes('stunned')) ctx.fillStyle = '#fbbf24'; // Amber
+                else if (condition.toLowerCase().includes('inconscient') || condition.toLowerCase().includes('unconscious')) ctx.fillStyle = '#ef4444'; // Red
+                else ctx.fillStyle = '#60a5fa'; // Default Blue
+
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 2;
+                ctx.strokeText(condition, sx, conditionY);
+                ctx.fillText(condition, sx, conditionY);
+                ctx.restore();
+
+                conditionY += (12 * cam.scale); // Move down for next condition
+            });
         }
     }
     ctx.restore();

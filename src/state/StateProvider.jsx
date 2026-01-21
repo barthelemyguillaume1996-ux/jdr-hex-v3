@@ -68,6 +68,14 @@ function reducer(state, action) {
         case 'SET_CURRENT_MAP':
             return { ...state, currentMapUrl: action.url };
         case 'ADD_TOKEN':
+            // Safety: Prevent adding duplicate Firebase tokens (fixes ghost listener race conditions)
+            if (action.payload.firebaseUserId) {
+                const alreadyExists = state.tokens.some(t =>
+                    t.firebaseUserId === action.payload.firebaseUserId &&
+                    t.firebaseCharacterIndex === action.payload.firebaseCharacterIndex
+                );
+                if (alreadyExists) return state;
+            }
             return { ...state, tokens: [...state.tokens, action.payload] };
         case 'UPDATE_TOKEN':
             return {
@@ -78,6 +86,29 @@ function reducer(state, action) {
             const remaining = state.tokens.filter(t => t.id !== action.id);
             return { ...state, tokens: remaining };
 
+        case 'DEDUPLICATE_TOKENS': {
+            const seen = new Set();
+            const uniqueTokens = [];
+            // Preserve order, keep first occurrence
+            for (const t of state.tokens) {
+                let key;
+                if (t.firebaseUserId !== undefined && t.firebaseUserId !== null) {
+                    // Unique by Firebase ID
+                    key = `fb_${t.firebaseUserId}_${t.firebaseCharacterIndex}`;
+                } else {
+                    // Fallback: Unique by Name for legacy tokens
+                    key = `name_${t.name}`;
+                }
+
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    uniqueTokens.push(t);
+                }
+            }
+            console.log(`Deduplication: Reduced ${state.tokens.length} tokens to ${uniqueTokens.length}`);
+            return { ...state, tokens: uniqueTokens };
+        }
+
         case 'UPDATE_TOKEN_POSITION': {
             const { id, newQ, newR, startQ, startR } = action;
 
@@ -87,7 +118,7 @@ function reducer(state, action) {
                     if (t.id !== id) return t;
 
                     // Calculate distance moved
-                    const distance = hexDistance(startQ, startR, newQ, newR);
+                    const distance = action.cost !== undefined ? action.cost : hexDistance(startQ, startR, newQ, newR);
                     const remainingSpeed = t.remainingSpeed !== undefined ? t.remainingSpeed : (t.speed || 30);
 
                     // Consume speed

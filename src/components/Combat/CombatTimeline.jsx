@@ -78,6 +78,17 @@ export default function CombatTimeline() {
                     <div className="text-[10px] text-white/60 mt-1 font-mono">
                         {t.remainingSpeed !== undefined ? t.remainingSpeed : (t.speed || 30)}/{t.speed || 30}m
                     </div>
+
+                    {/* HP Indicator */}
+                    <div className="w-full h-1 mt-1 bg-white/20 rounded overflow-hidden">
+                        <div
+                            className="h-full bg-red-500 transition-all duration-300"
+                            style={{ width: `${Math.min(100, Math.max(0, ((t.hp || 0) / (t.maxHp || 1)) * 100))}%` }}
+                        />
+                    </div>
+                    <div className="text-[9px] text-white/50 font-mono mt-0.5">
+                        {t.hp || 0}/{t.maxHp || 0} HP
+                    </div>
                 </div>
             ))}
 

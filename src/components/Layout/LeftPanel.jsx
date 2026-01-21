@@ -155,34 +155,73 @@ export default function LeftPanel() {
                     </div>
 
                     {/* Palette for Drawing Mode */}
+                    {/* Palette for Drawing Mode */}
                     {ui.drawMode && (
-                        <div className="space-y-2 pt-2 animate-in slide-in-from-top-2">
-                            <h4 className="text-[10px] uppercase text-white/40 font-bold tracking-widest">Textures</h4>
-                            <div className="grid grid-cols-4 gap-2">
-                                {[
-                                    { id: "herbe", name: "Herbe", color: "#4ade80" },
-                                    { id: "pierre", name: "Pierre", color: "#9ca3af" },
-                                    { id: "eau", name: "Eau", color: "#3b82f6" },
-                                    { id: "sable", name: "Sable", color: "#fcd34d" },
-                                    { id: "bois", name: "Bois", color: "#92400e" },
-                                    { id: "neige", name: "Neige", color: "#f3f4f6" },
-                                    { id: "lave", name: "Lave", color: "#ef4444" },
-                                    { id: "route", name: "Route", color: "#4b5563" },
-                                ].map((t) => (
-                                    <button
-                                        key={t.id}
-                                        onClick={() => dispatch({ type: 'SET_BRUSH', payload: { type: 'tile', texture: t.id, color: t.color } })}
-                                        className={`group relative aspect-square rounded-lg border-2 transition-all overflow-hidden ${ui.currentBrush?.texture === t.id ? 'border-primary ring-2 ring-primary/50' : 'border-white/10 hover:border-white/40'
-                                            }`}
-                                        title={t.name}
-                                    >
-                                        <div
-                                            className="absolute inset-0 bg-cover bg-center"
-                                            style={{ backgroundImage: `url('./textures/${t.id}.png')`, backgroundColor: t.color }} // Relative path for cross-platform compatibility
-                                        />
-                                        <div className="absolute inset-0 bg-black/20 group-hover:bg-transparent transition-colors" />
-                                    </button>
-                                ))}
+                        <div className="space-y-4 pt-2 animate-in slide-in-from-top-2">
+
+                            {/* SECTION: SOLS */}
+                            <div className="space-y-2">
+                                <h4 className="text-[10px] uppercase text-white/40 font-bold tracking-widest">Sols & Terrains</h4>
+                                <div className="grid grid-cols-4 gap-2">
+                                    {[
+                                        { id: "herbe", name: "Herbe", color: "#4ade80" },
+                                        { id: "terre", name: "Terre", color: "#78350f" },
+                                        { id: "pierre", name: "Pierre", color: "#9ca3af" },
+                                        { id: "pave", name: "Pavé", color: "#4b5563" },
+                                        { id: "eau", name: "Eau", color: "#3b82f6" },
+                                        { id: "sable", name: "Sable", color: "#fcd34d" },
+                                        { id: "bois", name: "Bois", color: "#92400e" },
+                                        { id: "neige", name: "Neige", color: "#f3f4f6" },
+                                        { id: "lave", name: "Lave", color: "#ef4444" },
+                                        { id: "route", name: "Route", color: "#4b5563" },
+                                    ].map((t) => (
+                                        <button
+                                            key={t.id}
+                                            onClick={() => dispatch({ type: 'SET_BRUSH', payload: { type: 'tile', texture: t.id, color: t.color } })}
+                                            className={`group relative aspect-square rounded-lg border-2 transition-all overflow-hidden ${ui.currentBrush?.texture === t.id ? 'border-primary ring-2 ring-primary/50' : 'border-white/10 hover:border-white/40'
+                                                }`}
+                                            title={t.name}
+                                        >
+                                            <div
+                                                className="absolute inset-0 bg-cover bg-center"
+                                                style={{ backgroundImage: `url('./textures/${t.id}.png')`, backgroundColor: t.color }} // Uses uploaded assets
+                                            />
+                                            <div className="absolute inset-0 bg-black/20 group-hover:bg-transparent transition-colors" />
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* SECTION: OBJETS */}
+                            <div className="space-y-2">
+                                <h4 className="text-[10px] uppercase text-white/40 font-bold tracking-widest">Objets 3D</h4>
+                                <div className="grid grid-cols-4 gap-2">
+                                    {[
+                                        { id: "mur", name: "Mur", color: "#57534e" },
+                                        { id: "mur_bois", name: "Mur Bois", color: "#78350f" },
+                                        { id: "coffre", name: "Coffre", color: "#b45309" },
+                                        { id: "arbre", name: "Arbre", color: "#166534" },
+                                        { id: "rocher", name: "Rocher", color: "#57534e" },
+                                        { id: "table", name: "Table", color: "#78350f" },
+                                        { id: "tonneau", name: "Tonneau", color: "#92400e" },
+                                    ].map((t) => (
+                                        <button
+                                            key={t.id}
+                                            onClick={() => dispatch({ type: 'SET_BRUSH', payload: { type: 'tile', texture: t.id, color: t.color } })}
+                                            className={`group relative aspect-square rounded-lg border-2 transition-all overflow-hidden ${ui.currentBrush?.texture === t.id ? 'border-primary ring-2 ring-primary/50' : 'border-white/10 hover:border-white/40'
+                                                }`}
+                                            title={t.name}
+                                        >
+                                            <div
+                                                className="absolute inset-0 bg-cover bg-center"
+                                                style={{ backgroundImage: `url('./textures/${t.id}.png')`, backgroundColor: t.color }}
+                                            />
+                                            {/* Icon Overlay for Objects */}
+                                            <div className="absolute bottom-1 right-1 text-[10px] bg-black/50 rounded px-1 text-white/80">3D</div>
+                                            <div className="absolute inset-0 bg-black/20 group-hover:bg-transparent transition-colors" />
+                                        </button>
+                                    ))}
+                                </div>
                             </div>
 
                             <div className="flex flex-col gap-2 pt-2 border-t border-white/10 mt-2">

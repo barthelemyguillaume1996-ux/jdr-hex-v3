@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { pixelToAxialRounded, axialToPixel, getHexesInRange, hexDistance } from '@/lib/hexMath';
+import { pixelToAxialRounded, axialToPixel, getHexesInRange, hexDistance, findPath } from '@/lib/hexMath';
 import { dpiScaleCanvas, drawGrid, drawHover, drawTokens, drawOverlay, drawMap, drawPencilStrokes, drawMovementRange, screenToWorld } from './HexRenderer';
 import { useAppState, useAppDispatch } from '@/state/StateProvider';
 
@@ -264,7 +264,7 @@ export default function HexBoard({ locked = false }) {
 
     // --- Interaction Handlers ---
 
-    const handleBrushAction = (q, r, isRemove, brush) => {
+    const handleBrushAction = (q, r, isRemove, brush, wx, wy) => {
         const size = brush?.size || 1;
         // Get affected hexes
         const hexes = getHexesInRange(q, r, size - 1); // Size 1 = range 0
@@ -275,7 +275,20 @@ export default function HexBoard({ locked = false }) {
             dispatch({ type: 'OVERLAY_REMOVE_BATCH', payload: hexes });
         } else {
             const color = brush.color || "rgba(255, 100, 100, 0.5)";
-            const tiles = hexes.map(h => ({ q: h.q, r: h.r, color, texture: brush.texture }));
+
+            const tiles = hexes.map(h => {
+                const tileData = { q: h.q, r: h.r, color, texture: brush.texture };
+
+                // For Maps Objects (Walls / Chests), calculate offset for "Free Placement"
+                if (['mur', 'coffre'].includes(brush.texture) && wx !== undefined && wy !== undefined) {
+                    const { x: hexX, y: hexY } = axialToPixel(h.q, h.r, HEX_RADIUS);
+                    // Store offset from Hex Center to Mouse Position
+                    tileData.xOffset = wx - hexX;
+                    tileData.yOffset = wy - hexY;
+                }
+                return tileData;
+            });
+
             // Add only to Draft
             dispatch({ type: 'DRAFT_ADD_BATCH', payload: tiles });
         }
@@ -312,7 +325,7 @@ export default function HexBoard({ locked = false }) {
             // Right click / Alt click to remove OR Eraser tool? 
             const isEraser = (ui?.currentBrush?.type === 'eraser');
             const isRemove = e.button === 2 || e.altKey || isEraser;
-            handleBrushAction(q, r, isRemove, ui?.currentBrush);
+            handleBrushAction(q, r, isRemove, ui?.currentBrush, wx, wy);
             return;
         }
 
@@ -390,7 +403,7 @@ export default function HexBoard({ locked = false }) {
                 const isRemove = (e.buttons === 2) || e.altKey || isEraser;
 
                 if (e.buttons === 1 || e.buttons === 2) { // Allow drag with right click too
-                    handleBrushAction(q, r, isRemove, ui?.currentBrush);
+                    handleBrushAction(q, r, isRemove, ui?.currentBrush, wx, wy);
                 }
             }
         }
@@ -491,40 +504,87 @@ export default function HexBoard({ locked = false }) {
             const startQ = token.q;
             const startR = token.r;
 
-            // Calculate distance
-            const distance = hexDistance(startQ, startR, q, r);
-            const remainingSpeed = token.remainingSpeed !== undefined ? token.remainingSpeed : (token.speed || 30);
-
-            let finalQ = q;
-            let finalR = r;
-
-            // Clamp to movement range if in combat mode and this is the active token
+            // Combat Mode: Validate Path & Distance
             if (combatMode && ui?.activeTokenId === draggingTokenId) {
-                if (distance > remainingSpeed) {
-                    // Clamp to circle edge
-                    // Calculate direction and scale to remainingSpeed
-                    const dq = q - startQ;
-                    const dr = r - startR;
-                    const ratio = remainingSpeed / distance;
+                const remainingSpeed = token.remainingSpeed !== undefined ? token.remainingSpeed : (token.speed || 30);
 
-                    finalQ = Math.round(startQ + dq * ratio);
-                    finalR = Math.round(startR + dr * ratio);
+                // Build Blocked Set (Walls & Chests)
+                const blockedSet = new Set();
+                const blockingTextures = ['mur', 'coffre'];
+
+                // Add overlays
+                if (overlayTiles) {
+                    overlayTiles.forEach(t => {
+                        if (checkTextureIsBlocking(t.texture)) blockedSet.add(`${t.q},${t.r}`);
+                    });
                 }
-            }
+                // Add Draft overlays (Important: newly drawn walls are here!)
+                if (draftOverlayTiles) {
+                    draftOverlayTiles.forEach(t => {
+                        if (checkTextureIsBlocking(t.texture)) blockedSet.add(`${t.q},${t.r}`);
+                    });
+                }
 
-            // Use new action to update position and consume speed
-            dispatch({
-                type: 'UPDATE_TOKEN_POSITION',
-                id: draggingTokenId,
-                newQ: finalQ,
-                newR: finalR,
-                startQ,
-                startR
-            });
+                // Add other DEPLOYED tokens as obstacles (optional rule, but good for tactical depth)
+                // For now, let's just stick to walls/chests as per user request.
+
+                // Pathfinding 
+                // We import findPath dynamically? No, imports are static.
+                // We need to import it at top of file. 
+                // Assuming it's imported as `findPath`.
+
+                // If start is blocked (bug?), ignore for start point
+                blockedSet.delete(`${startQ},${startR}`);
+
+                const pathLength = findPath({ q: startQ, r: startR }, { q, r }, blockedSet);
+
+                if (pathLength === null) {
+                    // Path Blocked or Invalid
+                    // Reset to start
+                    setDraggingTokenId(null);
+                    setDragPos(null);
+                    return;
+                }
+
+                if (pathLength > remainingSpeed) {
+                    // Too far - Snap back to start (or clamp logic could be improved to find node on path)
+                    // For now: Snap back to start to enforce rules strictly
+                    setDraggingTokenId(null);
+                    setDragPos(null);
+                    return;
+                }
+
+                // Valid Path: Update
+                dispatch({
+                    type: 'UPDATE_TOKEN_POSITION',
+                    id: draggingTokenId,
+                    newQ: q, // Use actual destination
+                    newR: r,
+                    startQ,
+                    startR,
+                    cost: pathLength // Pass actual cost
+                });
+
+            } else {
+                // Non-Combat or GM Move: Free Move
+                dispatch({
+                    type: 'UPDATE_TOKEN_POSITION',
+                    id: draggingTokenId,
+                    newQ: q,
+                    newR: r,
+                    startQ,
+                    startR
+                });
+            }
 
             setDraggingTokenId(null);
             setDragPos(null);
         }
+    };
+
+    // Helper for blocking check
+    const checkTextureIsBlocking = (textureId) => {
+        return ['mur', 'mur_bois', 'coffre', 'arbre', 'rocher', 'table', 'tonneau'].includes(textureId);
     };
 
     // Disabled Zoom
